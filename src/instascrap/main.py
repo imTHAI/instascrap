@@ -3,7 +3,6 @@ on the spot. No retry, no next account."""
 
 import argparse
 import logging
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +25,13 @@ class SessionResult:
     blocked: str | None = None
 
 
+def _record_block(store: Store, result: SessionResult, exc: BlockedError, now: datetime) -> SessionResult:
+    result.blocked = str(exc)
+    store.record_block(str(exc), now)
+    notify("instascrap bloqué", f"{exc} — pause de sécurité", level="alert")
+    return result
+
+
 def run_session(cfg: Config, store: Store, session, now: datetime) -> SessionResult:
     result = SessionResult()
 
@@ -33,25 +39,22 @@ def run_session(cfg: Config, store: Store, session, now: datetime) -> SessionRes
     if until and until > now:
         log.warning("blocked until %s, doing nothing", until)
         return result
-    if until:
-        store.clear_block()
+    # An expired block record is deliberately left in place rather than cleared
+    # here: if this run gets blocked again immediately, record_block must still
+    # see the prior record to escalate 24h -> 72h (consecutive-block backoff).
+    # It is cleared only once this run completes without hitting a block.
+    had_expired_block = until is not None
 
     try:
         session.warm_up()
     except BlockedError as exc:
-        result.blocked = str(exc)
-        store.record_block(str(exc), now)
-        notify("instascrap bloqué", f"{exc} — pause de sécurité", level="alert")
-        return result
+        return _record_block(store, result, exc, now)
 
     for account in store.visit_order(cfg.accounts, cfg.accounts_per_session):
         try:
             payloads = session.visit_profile(account)
         except BlockedError as exc:
-            result.blocked = str(exc)
-            store.record_block(str(exc), now)
-            notify("instascrap bloqué", f"{exc} — pause de sécurité", level="alert")
-            return result
+            return _record_block(store, result, exc, now)
 
         known = store.known_shortcodes(account)
         for payload in payloads:
@@ -68,6 +71,8 @@ def run_session(cfg: Config, store: Store, session, now: datetime) -> SessionRes
         result.visited.append(account)
         session.gap()
 
+    if had_expired_block:
+        store.clear_block()
     if result.new_posts:
         store.mark_new_post(now)
     return result
@@ -114,13 +119,21 @@ def main(argv: list[str] | None = None) -> int:
                 log.info("captured %s", store.archive_raw(args.capture, payload, now))
         return 0
 
-    try:
-        with Session(cfg, profile_dir) as session:
-            result = run_session(cfg, store, session, now)
-    except Exception as exc:  # noqa: BLE001 — last line of defence before cron eats it
-        log.exception("session failed")
-        notify("instascrap en échec", str(exc), level="alert")
-        return 1
+    until = store.blocked_until()
+    if until and until > now:
+        # Chrome must not even launch during a backoff: opening a browser is
+        # itself part of what a block is meant to suppress. run_session carries
+        # the same check for callers that construct a session directly.
+        log.warning("blocked until %s, doing nothing", until)
+        result = SessionResult()
+    else:
+        try:
+            with Session(cfg, profile_dir) as session:
+                result = run_session(cfg, store, session, now)
+        except Exception as exc:  # noqa: BLE001 — last line of defence before cron eats it
+            log.exception("session failed")
+            notify("instascrap en échec", str(exc), level="alert")
+            return 1
 
     log.info("visited=%s new_posts=%d blocked=%s",
              result.visited, result.new_posts, result.blocked)
