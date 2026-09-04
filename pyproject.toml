@@ -2,7 +2,12 @@
 name = "instascrap"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["playwright>=1.49", "feedgen>=1.0"]
+# playwright is pinned exactly (not >=) because the Docker image installs it on top
+# of mcr.microsoft.com/playwright:v1.49.0-noble, which bundles browser binaries built
+# for that exact library version. A newer playwright than the image's browsers fails
+# at runtime with a "browser not found"-class error the --help smoke test can't catch.
+# Bumping the base image tag in Dockerfile requires bumping this pin to match.
+dependencies = ["playwright==1.49.0", "feedgen>=1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "feedparser>=6.0"]

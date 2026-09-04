@@ -1,0 +1,8 @@
+.git/
+.venv/
+data/
+tests/
+docs/
+config.toml
+__pycache__/
+uv.lock
