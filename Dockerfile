@@ -15,6 +15,12 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 RUN python3 -m pip install --no-cache-dir --break-system-packages .
 
+# browser.py launches channel="chrome" — real Google Chrome, not the Chromium the
+# base image bundles — deliberately, for the TLS/HTTP2 fingerprint fidelity a bundled
+# Chromium doesn't give it. The base image doesn't ship it; this pulls the current
+# Google Chrome .deb and its apt dependencies via Playwright's own installer.
+RUN python3 -m playwright install chrome
+
 ENV PYTHONUNBUFFERED=1
 # python3, not python: the base image has no `python` alias (only /usr/bin/python3).
 ENTRYPOINT ["python3", "-m", "instascrap"]
