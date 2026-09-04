@@ -43,17 +43,25 @@ class Session:
         self._block: BlockedError | None = None
 
     def __enter__(self) -> "Session":
+        # The `with` protocol never calls __exit__ if __enter__ itself raises, so a
+        # failure partway through setup (bad channel, locked profile dir, launch
+        # timeout) must clean up whatever was already started before propagating —
+        # otherwise the driver subprocess is orphaned for the life of the process.
         self._playwright = sync_playwright().start()
-        self.context = self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(self.profile_dir),
-            channel="chrome",
-            headless=self.headless,
-            locale="fr-FR",
-            timezone_id="Europe/Paris",
-            viewport={"width": 1440, "height": 900},
-        )
-        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
-        self.page.on("response", self._on_response)
+        try:
+            self.context = self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.profile_dir),
+                channel="chrome",
+                headless=self.headless,
+                locale="fr-FR",
+                timezone_id="Europe/Paris",
+                viewport={"width": 1440, "height": 900},
+            )
+            self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+            self.page.on("response", self._on_response)
+        except Exception:
+            self._playwright.stop()
+            raise
         return self
 
     def __exit__(self, *exc) -> None:
