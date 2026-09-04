@@ -137,10 +137,14 @@ class Store:
         # (one payload per page of results): the timestamp alone is not unique,
         # so disambiguate on collision rather than silently overwriting the raw
         # archive, which is the only way to re-parse history without a browser.
+        # `_` (0x5F) is used rather than `-` (0x2D) because it sorts after `.`
+        # (0x2E): a bare stem must always sort before any suffixed one, and the
+        # zero-padded counter keeps write order intact past nine collisions
+        # (`_010` after `_009`), so a directory listing stays chronological.
         path = directory / f"{stem}.json.gz"
         suffix = 1
         while path.exists():
-            path = directory / f"{stem}-{suffix}.json.gz"
+            path = directory / f"{stem}_{suffix:03d}.json.gz"
             suffix += 1
         self._write_bytes_atomic(path, gzip.compress(json.dumps(payload).encode()))
         return path

@@ -72,3 +72,9 @@ def test_archive_raw_disambiguates_same_timestamp(tmp_path):
     assert first != second
     assert json.loads(gzip.decompress(first.read_bytes())) == {"page": 1}
     assert json.loads(gzip.decompress(second.read_bytes())) == {"page": 2}
+
+def test_archive_raw_collisions_sort_in_write_order(tmp_path):
+    store = Store(tmp_path)
+    written = [store.archive_raw("alice", {"page": n}, NOW) for n in (1, 2, 3)]
+    on_disk = sorted(p.name for p in (tmp_path / "raw/alice").iterdir())
+    assert on_disk == [p.name for p in written]
