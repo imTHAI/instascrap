@@ -10,13 +10,13 @@ public_base_url = "https://example.test"
 public_prefix = "{prefix}"
 accounts_per_session = 7
 feed_items = 50
-min_gap_seconds = 25
-max_gap_seconds = 90
+min_gap_seconds = {min_gap_seconds}
+max_gap_seconds = {max_gap_seconds}
 """
 
-def write_cfg(tmp_path, accounts='["alice", "bob"]', prefix="0123456789abcdef"):
+def write_cfg(tmp_path, accounts='["alice", "bob"]', prefix="0123456789abcdef", min_gap_seconds=25, max_gap_seconds=90):
     path = tmp_path / "config.toml"
-    path.write_text(BASE.format(accounts=accounts, prefix=prefix))
+    path.write_text(BASE.format(accounts=accounts, prefix=prefix, min_gap_seconds=min_gap_seconds, max_gap_seconds=max_gap_seconds))
     return path
 
 def test_load_config_reads_all_fields(tmp_path):
@@ -36,6 +36,10 @@ def test_load_config_rejects_empty_accounts(tmp_path):
 
 def test_load_config_strips_trailing_slash_from_base_url(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text(BASE.format(accounts='["a"]', prefix="0123456789abcdef")
+    path.write_text(BASE.format(accounts='["a"]', prefix="0123456789abcdef", min_gap_seconds=25, max_gap_seconds=90)
                     .replace("https://example.test", "https://example.test/"))
     assert load_config(path).public_base_url == "https://example.test"
+
+def test_load_config_rejects_invalid_gap_order(tmp_path):
+    with pytest.raises(ValueError, match="min_gap_seconds"):
+        load_config(write_cfg(tmp_path, min_gap_seconds=100, max_gap_seconds=50))
