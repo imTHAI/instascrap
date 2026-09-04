@@ -99,7 +99,7 @@ class Store:
             # An existing file is never rewritten: replaying a session must leave
             # mtimes and hard links untouched.
             if not target.exists():
-                target.write_bytes(media_bytes[media.url])
+                self._write_bytes_atomic(target, media_bytes[media.url])
             stored.append(dataclasses.replace(media, path=rel))
 
         saved = dataclasses.replace(post, media=tuple(stored))
@@ -107,8 +107,19 @@ class Store:
         self._posts_dir(post.account).mkdir(parents=True, exist_ok=True)
         json_path = self._posts_dir(post.account) / f"{post.shortcode}.json"
         if not json_path.exists():
-            json_path.write_text(json.dumps(saved.to_dict(), indent=2, ensure_ascii=False))
+            self._write_bytes_atomic(
+                json_path, json.dumps(saved.to_dict(), indent=2, ensure_ascii=False).encode()
+            )
         return saved
+
+    def _write_bytes_atomic(self, path: Path, data: bytes) -> None:
+        # A container kill mid-write must never leave a truncated file behind: a
+        # truncated file would still pass the `.exists()` replay guard above and
+        # so would never get repaired. Write to a sibling temp file and rename,
+        # matching the pattern `_write` already uses for state.json.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
 
     def load_posts(self, account: str, limit: int | None = None) -> list[Post]:
         directory = self._posts_dir(account)
@@ -121,6 +132,15 @@ class Store:
     def archive_raw(self, account: str, payload: dict, now: datetime) -> Path:
         directory = self.data_dir / "raw" / account
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{now.strftime('%Y%m%dT%H%M%S%f')}.json.gz"
-        path.write_bytes(gzip.compress(json.dumps(payload).encode()))
+        stem = now.strftime("%Y%m%dT%H%M%S%f")
+        # A single profile visit can call this multiple times with the same `now`
+        # (one payload per page of results): the timestamp alone is not unique,
+        # so disambiguate on collision rather than silently overwriting the raw
+        # archive, which is the only way to re-parse history without a browser.
+        path = directory / f"{stem}.json.gz"
+        suffix = 1
+        while path.exists():
+            path = directory / f"{stem}-{suffix}.json.gz"
+            suffix += 1
+        self._write_bytes_atomic(path, gzip.compress(json.dumps(payload).encode()))
         return path

@@ -64,3 +64,11 @@ def test_archive_raw_writes_gzipped_json(tmp_path):
     path = Store(tmp_path).archive_raw("alice", {"hello": "world"}, NOW)
     assert path.suffix == ".gz"
     assert json.loads(gzip.decompress(path.read_bytes())) == {"hello": "world"}
+
+def test_archive_raw_disambiguates_same_timestamp(tmp_path):
+    store = Store(tmp_path)
+    first = store.archive_raw("alice", {"page": 1}, NOW)
+    second = store.archive_raw("alice", {"page": 2}, NOW)
+    assert first != second
+    assert json.loads(gzip.decompress(first.read_bytes())) == {"page": 1}
+    assert json.loads(gzip.decompress(second.read_bytes())) == {"page": 2}
