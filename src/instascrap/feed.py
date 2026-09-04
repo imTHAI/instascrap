@@ -82,7 +82,7 @@ def publish(store: Store, cfg: Config) -> list[Path]:
         everything.extend(posts)
 
         path = out_dir / f"{account}.xml"
-        path.write_text(build_feed(account, posts, cfg))
+        path.write_text(build_feed(account, posts, cfg), encoding="utf-8")
         written.append(path)
 
         for post in posts:
@@ -92,6 +92,8 @@ def publish(store: Store, cfg: Config) -> list[Path]:
 
     everything.sort(key=lambda p: p.timestamp_utc, reverse=True)
     all_path = out_dir / "all.xml"
-    all_path.write_text(build_feed("tous les comptes", everything[:cfg.feed_items], cfg))
+    all_path.write_text(
+        build_feed("tous les comptes", everything[:cfg.feed_items], cfg), encoding="utf-8"
+    )
     written.append(all_path)
     return written
