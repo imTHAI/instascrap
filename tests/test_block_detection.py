@@ -23,5 +23,8 @@ def test_redirect_to_login_is_a_block():
 def test_challenge_url_is_a_block():
     assert detect_block(200, None, "https://www.instagram.com/challenge/AbCd/")
 
+def test_challenge_url_without_trailing_slash_is_a_block():
+    assert detect_block(200, None, "https://www.instagram.com/challenge?next=/alice/")
+
 def test_nested_feedback_required_is_found():
     assert detect_block(200, {"data": {"error": {"message": "feedback_required"}}}, OK_URL)

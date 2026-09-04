@@ -91,7 +91,7 @@ def extract_posts(payload: dict, account: str) -> list[Post]:
 
 
 _BLOCK_MARKERS = ("feedback_required", "challenge_required")
-_BLOCK_PATHS = ("/accounts/login", "/challenge/")
+_BLOCK_PATHS = ("/accounts/login", "/challenge")
 
 
 def detect_block(status: int, payload: dict | None, url: str) -> str | None:
