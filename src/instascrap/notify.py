@@ -15,9 +15,16 @@ def notify(summary: str, description: str, level: str = "warning") -> bool:
         log.warning("notification (no Unraid host): %s — %s", summary, description)
         return False
 
-    subprocess.run(
-        [str(NOTIFY_SCRIPT), "-e", "instascrap", "-s", summary,
-         "-d", description, "-i", level],
-        check=False,
-    )
+    try:
+        subprocess.run(
+            [str(NOTIFY_SCRIPT), "-e", "instascrap", "-s", summary,
+             "-d", description, "-i", level],
+            check=False,
+        )
+    except OSError as e:
+        # Catch PermissionError, FileNotFoundError, and other exec failures.
+        # Fall back to logging rather than propagate, so notify() never becomes
+        # a second failure point in the exception handler.
+        log.warning("notification exec failed: %s — %s (%s)", summary, description, e)
+        return False
     return True
