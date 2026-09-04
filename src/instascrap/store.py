@@ -4,13 +4,20 @@ The archive is the source of truth; feeds are a disposable projection of it.
 State writes go through a temp file and a rename, because a session can be killed
 mid-write when the container is stopped."""
 
+import dataclasses
+import gzip
 import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
+
+from .models import Post
 
 FIRST_BACKOFF = timedelta(hours=24)
 REPEAT_BACKOFF = timedelta(hours=72)
+
+_EXT = {"image": ".jpg", "video": ".mp4"}
 
 
 class Store:
@@ -70,3 +77,50 @@ class Store:
         state = self._read()
         state["last_new_post"] = now.isoformat()
         self._write(state)
+
+    # --- archive --------------------------------------------------------
+
+    def _posts_dir(self, account: str) -> Path:
+        return self.data_dir / "posts" / account
+
+    def known_shortcodes(self, account: str) -> set[str]:
+        directory = self._posts_dir(account)
+        return {p.stem for p in directory.glob("*.json")} if directory.exists() else set()
+
+    def save_post(self, post: Post, media_bytes: dict[str, bytes]) -> Post:
+        media_dir = self.data_dir / "media" / post.account / post.shortcode
+        media_dir.mkdir(parents=True, exist_ok=True)
+
+        stored = []
+        for index, media in enumerate(post.media):
+            ext = _EXT.get(media.kind) or Path(urlparse(media.url).path).suffix or ".bin"
+            rel = f"media/{post.account}/{post.shortcode}/{index}{ext}"
+            target = self.data_dir / rel
+            # An existing file is never rewritten: replaying a session must leave
+            # mtimes and hard links untouched.
+            if not target.exists():
+                target.write_bytes(media_bytes[media.url])
+            stored.append(dataclasses.replace(media, path=rel))
+
+        saved = dataclasses.replace(post, media=tuple(stored))
+
+        self._posts_dir(post.account).mkdir(parents=True, exist_ok=True)
+        json_path = self._posts_dir(post.account) / f"{post.shortcode}.json"
+        if not json_path.exists():
+            json_path.write_text(json.dumps(saved.to_dict(), indent=2, ensure_ascii=False))
+        return saved
+
+    def load_posts(self, account: str, limit: int | None = None) -> list[Post]:
+        directory = self._posts_dir(account)
+        if not directory.exists():
+            return []
+        posts = [Post.from_dict(json.loads(p.read_text())) for p in directory.glob("*.json")]
+        posts.sort(key=lambda p: p.timestamp_utc, reverse=True)
+        return posts[:limit] if limit else posts
+
+    def archive_raw(self, account: str, payload: dict, now: datetime) -> Path:
+        directory = self.data_dir / "raw" / account
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{now.strftime('%Y%m%dT%H%M%S%f')}.json.gz"
+        path.write_bytes(gzip.compress(json.dumps(payload).encode()))
+        return path

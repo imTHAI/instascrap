@@ -1,0 +1,66 @@
+import gzip
+import json
+from datetime import datetime, timedelta, timezone
+from instascrap.models import Media, Post
+from instascrap.store import Store
+
+NOW = datetime(2026, 9, 4, 9, 0, tzinfo=timezone.utc)
+BYTES = {"https://cdn.test/1.jpg": b"jpegdata", "https://cdn.test/2.mp4": b"mp4data"}
+
+def make_post(shortcode="ABC123", ts=NOW):
+    return Post(
+        shortcode=shortcode, account="alice", timestamp_utc=ts,
+        caption="Salut", permalink=f"https://www.instagram.com/p/{shortcode}/",
+        media=(
+            Media("image", "https://cdn.test/1.jpg", 1080, 1080, None, None),
+            Media("video", "https://cdn.test/2.mp4", 1080, 1920, 3.0, None),
+        ),
+        is_carousel=True, like_count=1, comment_count=0,
+    )
+
+def test_save_post_writes_media_with_correct_extensions(tmp_path):
+    saved = Store(tmp_path).save_post(make_post(), BYTES)
+    assert saved.media[0].path == "media/alice/ABC123/0.jpg"
+    assert saved.media[1].path == "media/alice/ABC123/1.mp4"
+    assert (tmp_path / saved.media[0].path).read_bytes() == b"jpegdata"
+
+def test_save_post_writes_json_metadata(tmp_path):
+    Store(tmp_path).save_post(make_post(), BYTES)
+    data = json.loads((tmp_path / "posts/alice/ABC123.json").read_text())
+    assert data["shortcode"] == "ABC123"
+    assert data["media"][0]["path"] == "media/alice/ABC123/0.jpg"
+
+def test_known_shortcodes_reflects_archive(tmp_path):
+    store = Store(tmp_path)
+    assert store.known_shortcodes("alice") == set()
+    store.save_post(make_post("AAA"), BYTES)
+    store.save_post(make_post("BBB"), BYTES)
+    assert store.known_shortcodes("alice") == {"AAA", "BBB"}
+
+def test_saving_twice_is_idempotent(tmp_path):
+    store = Store(tmp_path)
+    store.save_post(make_post(), BYTES)
+    first = (tmp_path / "media/alice/ABC123/0.jpg").stat().st_mtime_ns
+    store.save_post(make_post(), BYTES)
+    assert (tmp_path / "media/alice/ABC123/0.jpg").stat().st_mtime_ns == first
+    assert store.known_shortcodes("alice") == {"ABC123"}
+
+def test_load_posts_returns_newest_first(tmp_path):
+    store = Store(tmp_path)
+    store.save_post(make_post("OLD", NOW - timedelta(days=3)), BYTES)
+    store.save_post(make_post("NEW", NOW), BYTES)
+    assert [p.shortcode for p in store.load_posts("alice")] == ["NEW", "OLD"]
+
+def test_load_posts_honours_limit(tmp_path):
+    store = Store(tmp_path)
+    for index, code in enumerate(("A", "B", "C")):
+        store.save_post(make_post(code, NOW - timedelta(days=index)), BYTES)
+    assert len(store.load_posts("alice", limit=2)) == 2
+
+def test_load_posts_on_unknown_account_is_empty(tmp_path):
+    assert Store(tmp_path).load_posts("nobody") == []
+
+def test_archive_raw_writes_gzipped_json(tmp_path):
+    path = Store(tmp_path).archive_raw("alice", {"hello": "world"}, NOW)
+    assert path.suffix == ".gz"
+    assert json.loads(gzip.decompress(path.read_bytes())) == {"hello": "world"}
