@@ -1,1 +1,7 @@
 .superpowers/
+__pycache__/
+*.pyc
+.venv/
+config.toml
+data/
+.pytest_cache/

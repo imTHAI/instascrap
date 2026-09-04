@@ -1,0 +1,11 @@
+# Copier en config.toml et compléter. config.toml est git-ignoré.
+accounts = ["compte_un", "compte_deux"]
+data_dir = "/data"
+publish_dir = "/publish"
+public_base_url = "https://feeds.example.com"
+# 16 hex, généré une fois : python3 -c "import secrets; print(secrets.token_hex(8))"
+public_prefix = "0000000000000000"
+accounts_per_session = 7
+feed_items = 50
+min_gap_seconds = 25
+max_gap_seconds = 90
