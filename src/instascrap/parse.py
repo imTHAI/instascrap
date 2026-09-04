@@ -2,6 +2,7 @@
 breaks when Instagram reshapes its responses, and fixtures make that a five-minute
 fix rather than a scraping session."""
 
+import json
 from datetime import datetime, timezone
 
 from .models import Media, Post
@@ -87,3 +88,29 @@ def extract_posts(payload: dict, account: str) -> list[Post]:
         if post is not None:
             posts.append(post)
     return posts
+
+
+_BLOCK_MARKERS = ("feedback_required", "challenge_required")
+_BLOCK_PATHS = ("/accounts/login", "/challenge/")
+
+
+def detect_block(status: int, payload: dict | None, url: str) -> str | None:
+    """Return a human-readable reason if Instagram is pushing back, else None.
+
+    Deliberately trigger-happy: a false positive costs one skipped session, a false
+    negative costs the account."""
+    if status in (401, 429):
+        return f"HTTP {status} on {url}"
+
+    for path in _BLOCK_PATHS:
+        if path in url:
+            return f"redirected to {path}"
+
+    if payload is not None:
+        # The marker can sit anywhere in the tree; serialising beats walking.
+        blob = json.dumps(payload)
+        for marker in _BLOCK_MARKERS:
+            if marker in blob:
+                return f"{marker} in response from {url}"
+
+    return None
