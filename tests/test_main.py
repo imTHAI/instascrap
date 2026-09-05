@@ -23,11 +23,16 @@ def cfg_for(tmp_path, accounts=("alice", "bob")):
                   feed_items=50, min_gap_seconds=0, max_gap_seconds=0)
 
 class FakeSession:
-    def __init__(self, raise_on=None, warm_up_raises=False):
+    def __init__(self, raise_on=None, warm_up_raises=False, media_fails_on=None,
+                 empty_for=(), payloads=None):
         self.raise_on = raise_on
         self.warm_up_raises = warm_up_raises
+        self.media_fails_on = media_fails_on
+        self.empty_for = empty_for
+        self.payloads = payloads
         self.visited = []
         self.warmed = False
+        self.fetched = []
 
     def warm_up(self):
         if self.warm_up_raises:
@@ -38,9 +43,14 @@ class FakeSession:
         if self.raise_on == account:
             raise BlockedError("HTTP 429 on profile")
         self.visited.append(account)
-        return [PAYLOAD]
+        if account in self.empty_for:
+            return []
+        return self.payloads if self.payloads is not None else [PAYLOAD]
 
     def fetch_media(self, url):
+        self.fetched.append(url)
+        if self.media_fails_on == url:
+            raise RuntimeError("CDN said no")
         return b"bytes"
 
     def gap(self):
@@ -165,3 +175,179 @@ max_gap_seconds = 0
 
     assert exit_code == 0
     assert constructions == []  # Chrome must never be launched during a backoff
+
+
+# --- one bad account must not wedge the rotation -----------------------------
+
+def test_media_failure_does_not_stop_the_other_accounts(tmp_path):
+    # Before this, a transient CDN failure propagated out of run_session before
+    # mark_visited ran: the account kept its old timestamp, sorted first again on
+    # the next run, failed at the same URL, and no other account was ever visited.
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    session = FakeSession(media_fails_on="https://cdn.test/AAA.jpg")
+    result = run_session(cfg, store, session, NOW)
+    assert session.visited == ["alice", "bob"]
+    assert result.visited == ["alice", "bob"]
+    assert result.new_posts == 0
+    assert len(result.failures) == 2
+
+
+def test_a_failing_account_is_still_marked_visited_so_rotation_advances(tmp_path):
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    run_session(cfg, store, FakeSession(media_fails_on="https://cdn.test/AAA.jpg"), NOW)
+    visited = json.loads((cfg.data_dir / "state.json").read_text())["visited"]
+    assert set(visited) == {"alice", "bob"}
+
+
+def test_a_failing_post_does_not_lose_the_rest_of_the_account(tmp_path):
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    two_posts = {"data": {"user": {"edge_owner_to_timeline_media": {"edges": [
+        {"node": {"shortcode": "GOOD", "taken_at_timestamp": 1756729800,
+                  "display_url": "https://cdn.test/GOOD.jpg",
+                  "dimensions": {"width": 1, "height": 1},
+                  "edge_media_to_caption": {"edges": []}}},
+        {"node": {"shortcode": "BAD", "taken_at_timestamp": 1756729800,
+                  "display_url": "https://cdn.test/BAD.jpg",
+                  "dimensions": {"width": 1, "height": 1},
+                  "edge_media_to_caption": {"edges": []}}},
+    ]}}}}
+    store = Store(cfg.data_dir)
+    session = FakeSession(media_fails_on="https://cdn.test/BAD.jpg", payloads=[two_posts])
+    result = run_session(cfg, store, session, NOW)
+    assert store.known_shortcodes("alice") == {"GOOD"}
+    assert result.new_posts == 1
+    assert result.failures and "BAD" in result.failures[0]
+
+
+def test_block_still_short_circuits_even_though_failures_are_isolated(tmp_path):
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    session = FakeSession(raise_on="alice")
+    result = run_session(cfg, store, session, NOW)
+    assert result.blocked is not None
+    assert result.visited == []
+    assert store.blocked_until() == NOW + timedelta(hours=24)
+
+
+def test_empty_visit_is_reported_not_swallowed(tmp_path):
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    result = run_session(cfg, store, FakeSession(empty_for=("alice",)), NOW)
+    assert result.empty_visits == ["alice"]
+    assert result.visited == ["alice", "bob"]   # still rotates on
+
+
+def test_dropped_nodes_are_counted(tmp_path):
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    junk = {"data": {"user": {"edge_owner_to_timeline_media": {"edges": [
+        {"node": {"shortcode": "NOMEDIA", "taken_at_timestamp": 1756729800}},
+    ]}}}}
+    result = run_session(cfg, Store(cfg.data_dir), FakeSession(payloads=[junk]), NOW)
+    assert result.dropped_nodes == 1
+    assert result.new_posts == 0
+
+
+# --- the report deploy/run.sh reads back --------------------------------------
+
+def write_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f"""
+accounts = ["alice", "bob"]
+data_dir = "{tmp_path / "data"}"
+publish_dir = "{tmp_path / "pub"}"
+public_base_url = "https://example.test"
+public_prefix = "0123456789abcdef"
+accounts_per_session = 2
+feed_items = 50
+min_gap_seconds = 0
+max_gap_seconds = 0
+""")
+    return config_path
+
+
+def patch_common(monkeypatch, session_factory):
+    monkeypatch.setattr(main_module, "Session", session_factory)
+    monkeypatch.setattr(main_module, "publish", lambda store, cfg: [])
+    monkeypatch.setattr(main_module, "notify", lambda *a, **kw: True)
+
+
+class ContextSession:
+    """Wraps a FakeSession in the context-manager protocol main() expects."""
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    def __enter__(self):
+        return self.inner
+
+    def __exit__(self, *exc):
+        return False
+
+
+def read_report(tmp_path):
+    return json.loads((tmp_path / "data" / "last_run.json").read_text())
+
+
+def test_successful_run_writes_an_ok_report_and_exits_zero(tmp_path, monkeypatch):
+    config_path = write_config(tmp_path)
+    patch_common(monkeypatch, ContextSession(FakeSession()))
+    assert main_module.main(["--run", "--config", str(config_path)]) == 0
+    report = read_report(tmp_path)
+    assert report["ok"] is True and report["blocked"] is False
+    assert report["visited"] == 2 and report["new_posts"] == 2
+
+
+def test_blocked_run_exits_two_and_says_so_in_the_report(tmp_path, monkeypatch):
+    config_path = write_config(tmp_path)
+    patch_common(monkeypatch, ContextSession(FakeSession(raise_on="alice")))
+    assert main_module.main(["--run", "--config", str(config_path)]) == 2
+    report = read_report(tmp_path)
+    assert report["blocked"] is True and "429" in report["reason"]
+
+
+def test_crash_exits_one_and_still_writes_a_report(tmp_path, monkeypatch):
+    config_path = write_config(tmp_path)
+
+    def explode(store, cfg):
+        raise OSError("No space left on device")
+
+    patch_common(monkeypatch, ContextSession(FakeSession()))
+    monkeypatch.setattr(main_module, "publish", explode)   # the realistic failure
+    assert main_module.main(["--run", "--config", str(config_path)]) == 1
+    report = read_report(tmp_path)
+    assert report["ok"] is False
+    assert "No space left" in report["error"]
+
+
+def test_report_fields_survive_a_quote_laden_error(tmp_path, monkeypatch):
+    # run.sh reads this file with sed, which has no notion of JSON escaping.
+    config_path = write_config(tmp_path)
+
+    def explode(store, cfg):
+        raise RuntimeError('bad "quoted" thing\nsecond line')
+
+    patch_common(monkeypatch, ContextSession(FakeSession()))
+    monkeypatch.setattr(main_module, "publish", explode)
+    main_module.main(["--run", "--config", str(config_path)])
+    error = read_report(tmp_path)["error"]
+    assert '"' not in error and "\n" not in error and "\\" not in error
+
+
+def test_report_is_written_even_while_blocked_by_an_active_backoff(tmp_path, monkeypatch):
+    config_path = write_config(tmp_path)
+    store = Store(tmp_path / "data")
+    store.record_block("HTTP 429", NOW)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW + timedelta(hours=1)
+
+    monkeypatch.setattr(main_module, "datetime", FrozenDatetime)
+    patch_common(monkeypatch, ContextSession(FakeSession()))
+    assert main_module.main(["--run", "--config", str(config_path)]) == 0
+    assert "backoff" in read_report(tmp_path)["reason"]

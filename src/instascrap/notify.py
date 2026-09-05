@@ -1,5 +1,14 @@
-"""Unraid notifications. Silent failure is the enemy: a broken parser would
-otherwise show up as feeds that quietly stop growing, discovered weeks later."""
+"""Unraid notifications — the dev-host fallback only.
+
+In production this path is structurally dead and that is by design: the notify
+script is PHP, needs /usr/local/emhttp/webGui/include and an interpreter, and
+none of that exists inside the Playwright image, so every call here lands in the
+"script absent" branch and logs. The notification that actually reaches the user
+is raised by deploy/run.sh on the host, from the exit code and last_run.json.
+
+What this module is still for: running the code outside a container (on the
+Unraid box itself, or on a dev machine where it logs), so a manual --run or
+--capture is not silent."""
 
 import logging
 import subprocess

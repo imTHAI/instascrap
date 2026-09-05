@@ -5,6 +5,18 @@
 set -euo pipefail
 
 DATA=/mnt/user/appdata/instascrap
+LOCK="$DATA/session.lock"
+
+# Same lock run.sh takes. Two Chromes on one persistent profile directory corrupt
+# or lock it, which costs the Instagram session -- and a forced re-login is
+# exactly the repeated-login pattern that gets an account flagged. A scheduled
+# run can start at any point inside its 30-minute jitter window, so this
+# collision is a matter of timing, not of carelessness.
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "une session instascrap tourne déjà (verrou $LOCK) -- attends qu'elle finisse" >&2
+  exit 1
+fi
 
 docker run --rm -it \
   -v "$DATA:/data" \
