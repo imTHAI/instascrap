@@ -90,7 +90,7 @@ def _fetch_post_media(session, post) -> dict[str, bytes]:
     return fetched
 
 
-def _visit_account(cfg: Config, store: Store, session, account: str,
+def _visit_account(store: Store, session, account: str,
                    now: datetime, result: SessionResult) -> None:
     payloads = session.visit_profile(account)
     if not payloads:
@@ -144,7 +144,7 @@ def run_session(cfg: Config, store: Store, session, now: datetime) -> SessionRes
 
     for account in store.visit_order(cfg.accounts, cfg.accounts_per_session):
         try:
-            _visit_account(cfg, store, session, account, now, result)
+            _visit_account(store, session, account, now, result)
         except BlockedError as exc:
             return _record_block(store, result, exc, now)
         except Exception as exc:  # noqa: BLE001 — see the comment below

@@ -37,8 +37,10 @@ def _describe(post: Post, cfg: Config) -> str:
             parts.append(f'<img src="{url}" width="{media.width}" height="{media.height}">')
     if post.caption:
         # Instagram captions are newline-separated paragraphs; without this they
-        # render as one run-on block in the reader.
-        parts.append(f"<p>{escape(post.caption).replace(chr(10), '<br>')}</p>")
+        # render as one run-on block in the reader. Escaped first, so the <br>
+        # inserted afterwards is the only markup that survives from a caption.
+        caption = escape(post.caption).replace("\n", "<br>")
+        parts.append(f"<p>{caption}</p>")
     return "".join(parts)
 
 
