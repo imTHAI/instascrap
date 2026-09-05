@@ -1,4 +1,24 @@
-#!/usr/bin/env -S uv run --script
+# ============================================================================
+#  ABANDONED PROTOTYPE — DO NOT RUN. KEPT AS EVIDENCE, NOT AS A TOOL.
+#
+#  This is the instaloader approach instascrap exists to replace. Running it
+#  permanently flagged the owner's personal Instagram account: instaloader is
+#  an ordinary Python HTTP client, and the block lands on the whole fingerprint
+#  — OpenSSL's TLS (JA3/JA4) instead of a browser's, HTTP/1.1 instead of H2, a
+#  stale x-ig-www-claim, no JS, no assets, and a request pattern with no human
+#  timing in it. Cookie import does not help: the account went
+#  feedback_required on the first request after the import, and the IP got 401s
+#  anonymously.
+#
+#  It lives in docs/ rather than at the repo root, where it was one `uv run`
+#  away from being used again by mistake. It is kept, not deleted, because it
+#  is the record of why the project is built the way it is — see §2 of
+#  docs/superpowers/specs/2026-09-04-instascrap-design.md.
+#
+#  The working approach is a real browser on a persistent profile:
+#      python3 -m instascrap --run
+# ============================================================================
+
 # /// script
 # requires-python = ">=3.9"
 # dependencies = ["instaloader", "browser-cookie3"]

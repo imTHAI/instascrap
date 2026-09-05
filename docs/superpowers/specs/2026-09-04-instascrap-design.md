@@ -1,8 +1,13 @@
 # instascrap — design
 
-> **Statut** : validé en conception, non implémenté
-> **Date** : 2026-09-04
+> **Statut** : implémenté sur la branche `feat/instascrap` ; pas encore déployé
+> **Date** : 2026-09-04, amendé le 2026-09-05 (§4.3, §5.1, §5.3, §5.5, §5.6, §8, §12.1)
 > **Hôte cible** : tower (Unraid 7.3, x86_64)
+>
+> Les amendements du 2026-09-05 alignent le document sur ce qui a réellement été
+> construit. Là où la conception et le code divergeaient, c'est le code qui fait
+> foi — les écarts étaient des décisions prises pendant l'implémentation, pas des
+> dérives, et les laisser non consignés rendait la spec trompeuse.
 
 ## 1. Objectif
 
@@ -86,13 +91,21 @@ pour les médias — même inode, zéro duplication, archive indépendante du pu
 cron → verrou → lecture state.json → si blocked_until dans le futur : sortie immédiate
      → session Chrome sur profil persistant
      → fil d'accueil, 2-3 scrolls (camouflage, rien n'est extrait)
-     → pour chacun des 7 comptes les plus anciennement vus, ordre mélangé :
+     → pour chacun des 7 comptes les plus anciennement vus, dans cet ordre :
          navigation profil → interception des réponses JSON → archivage brut
          → parse → diff avec le dernier shortcode connu
          → pour chaque post nouveau : téléchargement médias + écriture JSON
          → pause aléatoire 25-90 s
      → régénération des XML concernés + all.xml → liens durs → fin
 ```
+
+> [!note]
+> L'ordre de visite est **déterministe** : les comptes sont triés par date de
+> dernière visite croissante, jamais mélangés. Un tirage aléatoire ne gagnait
+> rien côté camouflage — les pauses de 25-90 s portent déjà cette variabilité —
+> et coûtait la propriété qui compte : la garantie qu'aucun compte n'est laissé
+> de côté indéfiniment. Un compte est marqué visité même si sa visite échoue,
+> pour la même raison (voir §5.6).
 
 ### 4.4 Modules
 
@@ -115,8 +128,16 @@ cron → verrou → lecture state.json → si blocked_until dans le futur : sort
 
 `launch_persistent_context()` sur `/data/profile`, `channel="chrome"`,
 `headless=True`, résolution plausible, `locale="fr-FR"`, `timezone_id="Europe/Paris"`
-— cohérents avec une IP française. Un fichier verrou empêche le chevauchement de deux
-sessions.
+— cohérents avec une IP française.
+
+Un verrou `flock` sur `$DATA/session.lock` empêche le chevauchement de deux
+sessions. Il est pris **sur l'hôte**, par `deploy/run.sh` et `deploy/login.sh`,
+et non dans le conteneur : le cas à couvrir est justement celui de deux
+conteneurs, et `run.sh` prend le verrou après son décalage aléatoire pour ne pas
+tenir la place pendant une demi-heure d'attente. Deux Chrome sur un même profil
+persistant le corrompent ou le verrouillent, ce qui coûte la session Instagram et
+force une reconnexion — or ce sont les reconnexions répétées qui font marquer un
+compte.
 
 ### 5.2 Amorçage
 
@@ -128,8 +149,8 @@ volume ; toutes les sessions suivantes tournent en headless **sur ce même profi
 
 - Fil d'accueil : 2-3 scrolls, pauses 2-6 s.
 - Entre profils : pause aléatoire 25-90 s.
-- Dans un profil : la réponse du premier chargement suffit ; on ne pagine que si le
-  dernier post connu n'y figure pas — donc jamais en régime établi.
+- Dans un profil : **seule la réponse du premier chargement est exploitée**. Il
+  n'y a pas de pagination (voir la limite connue en §12.1).
 - Durée typique d'une session : ~10 minutes.
 
 ### 5.4 Interception
@@ -149,9 +170,33 @@ du navigateur avec ses cookies et ses en-têtes, jamais d'un client HTTP tiers.
 Signaux surveillés : HTTP 401 et 429, JSON contenant `feedback_required` ou
 `challenge_required`, redirection vers `/accounts/login` ou `/challenge/`.
 
+Ces signaux sont surveillés sur **tout** le trafic, y compris les téléchargements
+de médias : ceux-ci passent par `context.request.get()`, dont les réponses
+n'émettent pas d'événement `page.on("response")`, et sont donc contrôlés
+explicitement. Un blocage détecté n'est jamais oublié entre deux phases — il n'est
+remis à zéro qu'au démarrage d'une session, dans `warm_up`.
+
 Réaction : **arrêt immédiat de la session**. Pas de retry, pas de profil suivant.
 Écriture de `blocked_until` dans `state.json` et sortie. Le cron suivant lit ce champ
 et se termine sans ouvrir Chrome. Premier blocage : 24 h. Deuxième consécutif : 72 h.
+
+### 5.6 Échecs ordinaires (ce qui n'est *pas* un blocage)
+
+Un échec qui n'est pas un signal de blocage — CDN qui répond 503, média disparu,
+JSON malformé — est **isolé et enjambé**, jamais propagé :
+
+- au niveau du post : le post est sauté, le reste du compte est traité ;
+- au niveau du compte : l'échec est journalisé et compté, et **le compte est
+  marqué visité malgré tout**.
+
+Ce dernier point est contre-intuitif et délibéré. Sans lui, le compte gardait son
+ancienne date de visite, repassait donc en tête du tri au run suivant, échouait
+sur la même URL, et **plus aucun autre compte n'était jamais visité** — une panne
+silencieuse et auto-entretenue, bien pire que la moisson manquée qu'elle
+échangeait.
+
+La frontière reste nette : `BlockedError` court-circuite toujours toute la
+session, sans exception.
 
 ## 6. Modèle de post
 
@@ -171,7 +216,10 @@ Un fichier par compte, régénéré intégralement depuis l'archive à chaque se
 un `all.xml` agrégé. Fenêtre de 50 items ; l'archive garde tout.
 
 La description de chaque item est du HTML : images du carrousel en `<img>`, vidéos en
-`<video controls poster preload="none">`. News Explorer étant basé sur WebKit, les
+`<video controls poster preload="none">`. L'image de couverture (`poster`) est
+téléchargée et archivée **au moment de la capture**, en même temps que la vidéo :
+Instagram ne la fournit qu'à ce moment-là, et sans elle un `preload="none"` ne
+peint qu'un rectangle noir jusqu'au premier tap. News Explorer étant basé sur WebKit, les
 vidéos sont jouées en place ; `preload="none"` évite de tirer des dizaines de Mo à
 l'ouverture d'une liste. Un `<enclosure>` porte le média principal.
 
@@ -243,7 +291,25 @@ morte, pas une semaine calme.
 Stories, highlights, posts tagués, commentaires, hashtags, comptes privés,
 purge automatique (à ajouter seulement si le disque devient un sujet), interface web.
 
-## 12. Risques connus
+## 12. Limites et risques connus
+
+### 12.1 Une seule page de grid par visite
+
+Une visite de profil n'exploite que la première page du grid — typiquement les 12
+premiers posts. Il n'y a **ni pagination ni rattrapage** : `known_shortcodes` sert
+uniquement à ne pas retélécharger ce qui est déjà là, il ne détecte pas les trous.
+
+Conséquence, énoncée explicitement plutôt que laissée implicite : **un compte qui
+publie plus de ~12 fois entre deux visites perd définitivement le surplus.** Avec
+trois sessions par jour et ~20 comptes en rotation par groupes de 7, l'écart entre
+deux visites d'un même compte est d'environ un jour — le cas est donc rare, mais
+il est réel et silencieux.
+
+C'est un choix assumé : paginer, c'est envoyer des requêtes supplémentaires que la
+page n'aurait pas émises d'elle-même, ce qui est exactement le motif qui fait
+marquer un compte. L'ajouter est une décision séparée, à prendre sur constat.
+
+### 12.2 Risques
 
 | Risque | Mitigation |
 |:---|:---|
