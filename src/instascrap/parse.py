@@ -197,7 +197,12 @@ def has_profile_grid(payload) -> bool:
     for has arrived" from "something else arrived" (typically a home-feed
     payload left over from warm_up), without duplicating the container name
     Instagram uses. extract_posts_counted stays the parser of record for
-    whether what's inside is actually usable."""
+    whether what's inside is actually usable.
+
+    Known, accepted boundary: checks only that the container *key* is
+    present, not that its value is a usable dict -- a nulled-out container
+    would read as "grid received" indistinguishably from a genuinely empty
+    one. Not seen in a real capture and not worth tightening speculatively."""
     if isinstance(payload, dict):
         for key, value in payload.items():
             if key in PROFILE_GRID_CONTAINERS:

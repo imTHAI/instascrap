@@ -102,6 +102,25 @@ performed, per scope. Do them in this order; each depends on the one before it.
    exactly those two files, and `git status` clean afterward (aside from anything
    else you're mid-way through).
 
+## Redeploying updates
+
+The container image and `deploy/run.sh` reach tower as two separate manual
+steps (an image push/pull, and an `rsync`/copy of the script). Whenever a change
+touches both — a report-schema field rename in `last_run.json` is the case that
+bit this exact project once (`empty_visits` → `grid_missing`) — land both halves
+on tower in the **same session**, never one now and the other "later
+today." `run.sh`'s `field()`/`number()` helpers look fields up by name with
+`sed`; a field that the old script doesn't know to read, or that the old image
+doesn't yet write, comes back empty, `${VAR:-0}` reads that as zero, and the
+corresponding notification is silently suppressed for every run until the
+mismatched half is updated — self-healing once both sides match again, but
+exactly the quiet swallow this project exists to prevent in the meantime.
+
+Do not call a `run.sh`/image update finished until both files are on tower
+**and** one manual run (`bash deploy/run.sh`, or a `docker run ... --run`) has
+completed and produced a `last_run.json` you've actually read back — not just
+"the deploy commands returned 0."
+
 ## Files changed
 
 - `deploy/run.sh` (new, executable; amended post-review, see Fix report)
