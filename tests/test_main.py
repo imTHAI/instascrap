@@ -8,13 +8,14 @@ from instascrap.store import Store
 
 NOW = datetime(2026, 9, 4, 9, 0, tzinfo=timezone.utc)
 
-PAYLOAD = {"data": {"user": {"edge_owner_to_timeline_media": {"edges": [
-    {"node": {"shortcode": "AAA", "taken_at_timestamp": 1756729800, "is_video": False,
-              "display_url": "https://cdn.test/AAA.jpg",
-              "dimensions": {"width": 100, "height": 100},
-              "edge_media_to_caption": {"edges": []},
-              "edge_liked_by": {"count": 1},
-              "edge_media_to_comment": {"count": 0}}}]}}}}
+# Real Instagram node shape (see tests/fixtures/real_profile.json and
+# instascrap.parse) -- media_type 1 is a plain image, candidates carry their own
+# width/height, caption is a dict-or-null, counts are flat ints.
+PAYLOAD = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [
+    {"node": {"code": "AAA", "taken_at": 1756729800, "media_type": 1,
+              "caption": None, "like_count": 1, "comment_count": 0,
+              "image_versions2": {"candidates": [
+                  {"url": "https://cdn.test/AAA.jpg", "width": 100, "height": 100}]}}}]}}}
 
 def cfg_for(tmp_path, accounts=("alice", "bob")):
     return Config(accounts=accounts, data_dir=tmp_path / "data",
@@ -203,16 +204,14 @@ def test_a_failing_account_is_still_marked_visited_so_rotation_advances(tmp_path
 
 def test_a_failing_post_does_not_lose_the_rest_of_the_account(tmp_path):
     cfg = cfg_for(tmp_path, accounts=("alice",))
-    two_posts = {"data": {"user": {"edge_owner_to_timeline_media": {"edges": [
-        {"node": {"shortcode": "GOOD", "taken_at_timestamp": 1756729800,
-                  "display_url": "https://cdn.test/GOOD.jpg",
-                  "dimensions": {"width": 1, "height": 1},
-                  "edge_media_to_caption": {"edges": []}}},
-        {"node": {"shortcode": "BAD", "taken_at_timestamp": 1756729800,
-                  "display_url": "https://cdn.test/BAD.jpg",
-                  "dimensions": {"width": 1, "height": 1},
-                  "edge_media_to_caption": {"edges": []}}},
-    ]}}}}
+    two_posts = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [
+        {"node": {"code": "GOOD", "taken_at": 1756729800, "media_type": 1,
+                  "image_versions2": {"candidates": [
+                      {"url": "https://cdn.test/GOOD.jpg", "width": 1, "height": 1}]}}},
+        {"node": {"code": "BAD", "taken_at": 1756729800, "media_type": 1,
+                  "image_versions2": {"candidates": [
+                      {"url": "https://cdn.test/BAD.jpg", "width": 1, "height": 1}]}}},
+    ]}}}
     store = Store(cfg.data_dir)
     session = FakeSession(media_fails_on="https://cdn.test/BAD.jpg", payloads=[two_posts])
     result = run_session(cfg, store, session, NOW)
@@ -241,9 +240,9 @@ def test_empty_visit_is_reported_not_swallowed(tmp_path):
 
 def test_dropped_nodes_are_counted(tmp_path):
     cfg = cfg_for(tmp_path, accounts=("alice",))
-    junk = {"data": {"user": {"edge_owner_to_timeline_media": {"edges": [
-        {"node": {"shortcode": "NOMEDIA", "taken_at_timestamp": 1756729800}},
-    ]}}}}
+    junk = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [
+        {"node": {"code": "NOMEDIA", "taken_at": 1756729800}},  # no media_type at all
+    ]}}}
     result = run_session(cfg, Store(cfg.data_dir), FakeSession(payloads=[junk]), NOW)
     assert result.dropped_nodes == 1
     assert result.new_posts == 0
