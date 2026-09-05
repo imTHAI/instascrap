@@ -218,6 +218,36 @@ def test_image_node_with_no_usable_url_is_dropped():
 # --- robustness: verifies the parser survives payloads that aren't Instagram at all ---
 
 
+def test_malformed_candidate_entry_drops_that_node_but_not_others():
+    # A non-dict entry in `candidates` used to reach `_area()`'s `.get()` call
+    # unguarded and raise AttributeError, which was not in extract_posts_counted's
+    # except tuple -- that took down the whole harvest, not just this node.
+    bad = image_node(
+        code="BAD",
+        image_versions2={
+            "candidates": [
+                {"url": "https://cdn.test/good.jpg", "width": 100, "height": 100},
+                "not-a-dict",
+            ]
+        },
+    )
+    good = image_node()  # code "IMG001", untouched
+    posts, dropped = extract_posts_counted(envelope(bad, good), "alice")
+    assert [p.shortcode for p in posts] == ["IMG001"]
+    assert dropped == 1
+
+
+def test_old_invented_container_yields_nothing():
+    # edge_owner_to_timeline_media / shortcode / display_url was the pre-real-
+    # capture invented shape (see the deleted web_profile_info.json /
+    # timeline_graphql.json fixtures). Pinning this documents that dropping it
+    # from _EDGE_CONTAINERS was deliberate, not an oversight.
+    old_shaped = {
+        "data": {"user": {"edge_owner_to_timeline_media": {"edges": [{"node": image_node()}]}}}
+    }
+    assert extract_posts(old_shaped, "alice") == []
+
+
 def test_unrelated_payload_yields_nothing():
     assert extract_posts(load("unrelated.json"), "alice") == []
 

@@ -39,6 +39,23 @@ def _area(candidate: dict) -> int:
     return int(candidate.get("width", 0) or 0) * int(candidate.get("height", 0) or 0)
 
 
+def _valid_list_of_dicts(value) -> list[dict]:
+    """Shape guard for the three list-of-rendition-dicts boundaries this parser
+    reads (`image_versions2.candidates`, `video_versions`, `carousel_media`).
+
+    The old flat node shape had nothing this deeply nested; a non-dict entry
+    here used to be unreachable and is now one `.get()` away from an
+    AttributeError that would abort the whole harvest, not just this node. If
+    any entry isn't a dict, the whole list is treated as unusable (not
+    filtered down to the good entries) -- a reshape that puts garbage in this
+    list is a sign the list's meaning changed, and guessing which entries are
+    still trustworthy is worse than dropping the node cleanly.
+    """
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return value
+    return []
+
+
 def _best_image_candidate(node: dict) -> dict | None:
     """The rendition to archive for a still image (or a video's poster frame).
 
@@ -48,12 +65,14 @@ def _best_image_candidate(node: dict) -> dict | None:
     size (crops and resolutions are interleaved), so this scans all of them
     rather than trusting the first entry.
     """
-    candidates = (node.get("image_versions2") or {}).get("candidates") or []
+    image_versions2 = node.get("image_versions2")
+    raw_candidates = image_versions2.get("candidates") if isinstance(image_versions2, dict) else None
+    candidates = _valid_list_of_dicts(raw_candidates)
     if candidates:
         return max(candidates, key=_area)
     # Some nodes carry a single `display_uri` instead of a candidates list.
     display_uri = node.get("display_uri")
-    if display_uri:
+    if isinstance(display_uri, str) and display_uri:
         return {
             "url": display_uri,
             "width": node.get("original_width", 0),
@@ -86,9 +105,9 @@ def _leaf_media(node: dict) -> Media:
     media_type = node.get("media_type")
 
     if media_type == _MEDIA_TYPE_VIDEO:
-        video_candidates = node.get("video_versions") or []
+        video_candidates = _valid_list_of_dicts(node.get("video_versions"))
         if not video_candidates:
-            raise KeyError("video node carries no video_versions")
+            raise KeyError("video node carries no usable video_versions")
         chosen = _best_video_candidate(node, video_candidates)
         poster = _best_image_candidate(node)
         return Media(
@@ -126,9 +145,9 @@ def _post_from_node(node: dict, account: str) -> Post | None:
 
     media_type = node.get("media_type")
     if media_type == _MEDIA_TYPE_CAROUSEL:
-        children = node.get("carousel_media") or []
+        children = _valid_list_of_dicts(node.get("carousel_media"))
         if not children:
-            raise KeyError("carousel post carries no carousel_media")
+            raise KeyError("carousel post carries no usable carousel_media")
         media = tuple(_leaf_media(child) for child in children)
         is_carousel = True
     else:
@@ -179,8 +198,11 @@ def extract_posts_counted(payload: dict, account: str) -> tuple[list[Post], int]
             continue
         try:
             post = _post_from_node(node, account)
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, AttributeError):
             # A malformed node must never abort a whole session's harvest.
+            # The isinstance checks in _valid_list_of_dicts/_best_image_candidate
+            # already turn the known-shaped garbage into a clean drop; this is
+            # the backstop for whatever shape neither of us has seen yet.
             dropped += 1
             continue
         if post is None:
