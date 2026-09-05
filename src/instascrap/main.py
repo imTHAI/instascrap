@@ -14,7 +14,7 @@ from .browser import BlockedError, Session
 from .config import Config, load_config
 from .feed import publish
 from .notify import notify
-from .parse import extract_posts_counted
+from .parse import extract_posts_counted, has_profile_grid
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -38,8 +38,17 @@ class SessionResult:
     # Accounts whose visit raised something that was not a block. Recorded rather
     # than propagated: one bad account must not cost the rotation.
     failures: list[str] = field(default_factory=list)
-    # Accounts whose profile page yielded no matching JSON at all.
-    empty_visits: list[str] = field(default_factory=list)
+    # Accounts whose profile visit produced no payload carrying the profile-grid
+    # container at all -- not "zero new posts" (ordinary, silent), but "the
+    # thing we came for never showed up". Supersedes an earlier, narrower
+    # `empty_visits` that only caught a visit with *no* payload whatsoever: it
+    # missed the production case where a stray home-feed payload (left over
+    # from warm_up) arrived instead of the grid and made the visit look
+    # answered. Every old empty visit is still caught here — zero payloads
+    # trivially contains no grid — so nothing is lost by folding the two
+    # together, and the account only ever gets one notification about it
+    # instead of two describing the same underlying failure.
+    grid_missing: list[str] = field(default_factory=list)
     dropped_nodes: int = 0
 
 
@@ -93,15 +102,26 @@ def _fetch_post_media(session, post) -> dict[str, bytes]:
 def _visit_account(store: Store, session, account: str,
                    now: datetime, result: SessionResult) -> None:
     payloads = session.visit_profile(account)
-    if not payloads:
-        # A profile page always emits at least one matching JSON response. Zero is
-        # an anomaly — a broken interception filter or a page that no longer
-        # loads — not a quiet week, and reporting it as a clean session with no
-        # new posts is exactly the silence this project exists to break.
-        log.warning("no JSON payload captured for %s", account)
-        result.empty_visits.append(account)
-        return
+    if not any(has_profile_grid(p) for p in payloads):
+        # Session.visit_profile already waits for a grid payload specifically
+        # (see its docstring); getting here means that wait gave up — either
+        # nothing arrived at all, or only something else did (the stray
+        # home-feed payload that masked the michellemonaghan defect). Either
+        # way it is an anomaly, never a quiet week: a profile with no *new*
+        # posts still receives a grid payload whose edges are all already
+        # known, so this can never fire on a genuinely quiet account, only on
+        # one whose grid never showed up. Recorded, not raised — one bad
+        # profile must not cost the rotation any more than an ordinary
+        # failure does.
+        log.warning("no profile-grid response for %s (%d payload(s) captured)",
+                    account, len(payloads))
+        result.grid_missing.append(account)
 
+    # Archiving and parsing proceed regardless — even a stray non-grid payload
+    # is worth keeping in the raw archive, and is in fact how this defect was
+    # diagnosed in the first place. extract_posts_counted finds nothing to
+    # extract from it, which is fine: dropped_nodes is not the signal for this
+    # failure mode, grid_missing above is.
     known = store.known_shortcodes(account)
     for payload in payloads:
         store.archive_raw(account, payload, now)
@@ -210,7 +230,7 @@ def _run(cfg: Config, store: Store, profile_dir: Path, now: datetime) -> int:
         log.warning("blocked until %s, doing nothing", until)
         _write_last_run(cfg.data_dir, mode="run", ok=True, blocked=False,
                         reason=_flat(f"backoff actif jusqu'au {until.isoformat()}"),
-                        visited=0, new_posts=0, failures=0, empty_visits=0,
+                        visited=0, new_posts=0, failures=0, grid_missing=0,
                         dropped_nodes=0, stale=False, silent_days=_silent_days(store, now),
                         error="")
         return EXIT_OK
@@ -218,15 +238,16 @@ def _run(cfg: Config, store: Store, profile_dir: Path, now: datetime) -> int:
     with Session(cfg, profile_dir) as session:
         result = run_session(cfg, store, session, now)
 
-    log.info("visited=%s new_posts=%d failures=%d empty=%s dropped=%d blocked=%s",
+    log.info("visited=%s new_posts=%d failures=%d grid_missing=%s dropped=%d blocked=%s",
              result.visited, result.new_posts, len(result.failures),
-             result.empty_visits, result.dropped_nodes, result.blocked)
+             result.grid_missing, result.dropped_nodes, result.blocked)
 
     if not result.blocked:
         publish(store, cfg)
-    if result.empty_visits:
-        notify("instascrap sans réponse",
-               f"Aucun JSON capturé pour : {', '.join(result.empty_visits)}")
+    if result.grid_missing:
+        notify("instascrap grille manquante",
+               f"Grille de profil jamais reçue pour : {', '.join(result.grid_missing)} "
+               "— réponse lente, page reformée, ou interception cassée ?")
     stale = _check_staleness(store, now)
 
     _write_last_run(
@@ -240,7 +261,7 @@ def _run(cfg: Config, store: Store, profile_dir: Path, now: datetime) -> int:
         new_posts=result.new_posts,
         failures=len(result.failures),
         first_failure=_flat(result.failures[0] if result.failures else ""),
-        empty_visits=len(result.empty_visits),
+        grid_missing=len(result.grid_missing),
         dropped_nodes=result.dropped_nodes,
         stale=stale,
         silent_days=_silent_days(store, now),
@@ -307,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         if cfg is not None:
             _write_last_run(cfg.data_dir, mode="cli", ok=False, blocked=True,
                             reason=_flat(exc), visited=0, new_posts=0, failures=0,
-                            empty_visits=0, dropped_nodes=0, stale=False,
+                            grid_missing=0, dropped_nodes=0, stale=False,
                             silent_days=0, error="")
         return EXIT_BLOCKED
     except Exception as exc:  # noqa: BLE001 — last line of defence before cron eats it
@@ -316,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         if cfg is not None:
             _write_last_run(cfg.data_dir, mode="cli", ok=False, blocked=False,
                             reason="", visited=0, new_posts=0, failures=1,
-                            empty_visits=0, dropped_nodes=0, stale=False,
+                            grid_missing=0, dropped_nodes=0, stale=False,
                             silent_days=0, error=_flat(exc))
         # A config that will not load leaves no data_dir to write into; run.sh
         # treats a missing report on a non-zero exit as a failure in its own right.

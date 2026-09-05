@@ -92,7 +92,7 @@ ERROR=$(field error)
 VISITED=$(number visited)
 NEW_POSTS=$(number new_posts)
 FAILURES=$(number failures)
-EMPTY=$(number empty_visits)
+GRID_MISSING=$(number grid_missing)
 SILENT_DAYS=$(number silent_days)
 
 case "$STATUS" in
@@ -107,9 +107,9 @@ case "$STATUS" in
       notify_unraid "instascrap silencieux" \
         "Aucun post nouveau depuis ${SILENT_DAYS:-?} jours, tous comptes confondus -- parser cassé ?" alert
     fi
-    if [ "${EMPTY:-0}" != "0" ]; then
-      notify_unraid "instascrap sans réponse" \
-        "${EMPTY} profil(s) visité(s) sans aucun JSON capturé -- interception cassée ?" warning
+    if [ "${GRID_MISSING:-0}" != "0" ]; then
+      notify_unraid "instascrap grille manquante" \
+        "${GRID_MISSING} profil(s) visité(s) sans grille reçue -- réponse lente, page reformée, ou interception cassée ?" warning
     fi
     if [ "${FAILURES:-0}" != "0" ]; then
       notify_unraid "instascrap partiellement en échec" \

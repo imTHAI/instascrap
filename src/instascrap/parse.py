@@ -18,7 +18,13 @@ from .models import Media, Post
 # response wraps the profile's post edges here. Walking the payload (rather
 # than indexing straight to this key) keeps parse.py tolerant of whatever
 # wrapper object Instagram puts around it.
-_EDGE_CONTAINERS = ("xdt_api__v1__feed__user_timeline_graphql_connection",)
+#
+# Public on purpose: browser.py needs to recognise "the response a profile
+# visit is waiting for has arrived" (see has_profile_grid below), and that is
+# knowledge about Instagram's payload shape, which belongs here and nowhere
+# else -- this is the module that will need editing the day the container name
+# changes, and one definition means that edit is the only one required.
+PROFILE_GRID_CONTAINERS = ("xdt_api__v1__feed__user_timeline_graphql_connection",)
 
 # media_type on a node: 1 = single image, 2 = single video, 8 = carousel.
 _MEDIA_TYPE_IMAGE = 1
@@ -172,7 +178,7 @@ def _walk_edges(obj) -> list[dict]:
     found: list[dict] = []
     if isinstance(obj, dict):
         for key, value in obj.items():
-            if key in _EDGE_CONTAINERS and isinstance(value, dict):
+            if key in PROFILE_GRID_CONTAINERS and isinstance(value, dict):
                 found.extend(value.get("edges", []))
             else:
                 found.extend(_walk_edges(value))
@@ -180,6 +186,28 @@ def _walk_edges(obj) -> list[dict]:
         for item in obj:
             found.extend(_walk_edges(item))
     return found
+
+
+def has_profile_grid(payload) -> bool:
+    """True if `payload` carries a profile-grid container at any depth.
+
+    A structural check only -- it doesn't care whether the edges inside are
+    well-formed, just whether the container is present at all. That's what
+    browser.py needs: a way to tell "the response a profile visit is waiting
+    for has arrived" from "something else arrived" (typically a home-feed
+    payload left over from warm_up), without duplicating the container name
+    Instagram uses. extract_posts_counted stays the parser of record for
+    whether what's inside is actually usable."""
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in PROFILE_GRID_CONTAINERS:
+                return True
+            if has_profile_grid(value):
+                return True
+        return False
+    if isinstance(payload, list):
+        return any(has_profile_grid(item) for item in payload)
+    return False
 
 
 def extract_posts_counted(payload: dict, account: str) -> tuple[list[Post], int]:

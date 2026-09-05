@@ -15,11 +15,27 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from .config import Config
-from .parse import detect_block
+from .parse import detect_block, has_profile_grid
 
 log = logging.getLogger(__name__)
 
 API_MARKERS = ("/api/v1/", "/graphql/query")
+
+# How long visit_profile waits for the response carrying the profile grid,
+# instead of the flat 1.5-3.5s sleep this replaces (see visit_profile's
+# docstring for the production failure that sleep caused). 30s is not a round
+# number picked in isolation: it is Playwright's own default timeout for a
+# page action, already the standing tolerance for this exact navigation's
+# domcontentloaded wait (see is_transient_navigation_error's docstring, which
+# names the same 30s default) -- so this waits, at most, exactly as long as
+# the browser itself would already wait for the page to finish loading, no
+# longer. In the overwhelmingly common case the grid response arrives within
+# a second or two and PROFILE_GRID_POLL_S below lets the wait return early;
+# the full 30s is only ever spent on a profile that is *already* an anomaly,
+# where a few extra seconds of harmless polling is a fine trade against
+# silently missing a profile's entire grid.
+PROFILE_GRID_WAIT_TIMEOUT_S = 30.0
+PROFILE_GRID_POLL_S = 0.25
 
 
 class BlockedError(RuntimeError):
@@ -90,6 +106,31 @@ def retry_transient(fn, is_transient, *, attempts: int = NAV_RETRY_ATTEMPTS, sle
             if on_retry is not None:
                 on_retry(attempt, exc)
             sleep()
+
+
+def wait_for_condition(is_met, is_aborted, *, timeout_s: float, poll_s: float) -> bool:
+    """Poll `is_met` every `poll_s` until it turns true, `is_aborted` fires, or
+    `timeout_s` has elapsed; returns whether `is_met` was the reason.
+
+    `is_aborted` is checked first on every iteration, including the first —
+    an abort already true when the wait starts must win before `is_met` is
+    even consulted, which is what lets a caller use this to check a stashed
+    block without a race against the very first poll.
+
+    Elapsed time is a running tally of the `poll_s` increments actually
+    slept, not a wall-clock read: this is what makes it possible to unit-test
+    the full-timeout path instantly under a mocked `time.sleep`, mirroring
+    the pattern `retry_transient` above already uses for the same reason."""
+    elapsed = 0.0
+    while True:
+        if is_aborted():
+            return False
+        if is_met():
+            return True
+        if elapsed >= timeout_s:
+            return False
+        time.sleep(poll_s)
+        elapsed += poll_s
 
 
 class Session:
@@ -224,9 +265,31 @@ class Session:
         # the account is skipped and marked visited, and the rotation moves
         # on. Retrying up to ~90s here would trade that cheap fallback for
         # extra requests against Instagram with no evidence the race recurs
-        # mid-session.
+        # mid-session. This is still the one navigation of that single
+        # attempt — only what happens *after* it changed.
         self.page.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded")
-        self.page.wait_for_timeout(random.randint(1500, 3500))
+        # Wait for the response that actually carries the grid, not a flat
+        # delay: a flat 1.5-3.5s sleep is what let michellemonaghan's session
+        # come back empty in production — the grid response hadn't arrived in
+        # that window, so visit_profile returned with only a stray home-feed
+        # payload left over from warm_up in `self._captured`, and nothing
+        # downstream could tell that apart from an honest zero-new-posts
+        # visit. Bounded by PROFILE_GRID_WAIT_TIMEOUT_S so a profile whose
+        # grid genuinely never arrives (broken interception, a reshaped page)
+        # can't stall the session — the caller detects that case from the
+        # grid signal itself (has_profile_grid), not from the post count, so
+        # it still fires even after this wait gives up.
+        #
+        # is_aborted checks the stashed block on every poll, not only once
+        # this returns: a block landing mid-wait must stop the polling
+        # immediately rather than being discovered only after 30s of waiting
+        # on a session that is already over.
+        wait_for_condition(
+            is_met=lambda: any(has_profile_grid(p) for p in self._captured),
+            is_aborted=lambda: self._block is not None,
+            timeout_s=PROFILE_GRID_WAIT_TIMEOUT_S,
+            poll_s=PROFILE_GRID_POLL_S,
+        )
         self._raise_if_blocked()
         return list(self._captured)
 

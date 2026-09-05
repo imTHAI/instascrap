@@ -2,7 +2,7 @@ import json
 from datetime import timezone
 from pathlib import Path
 
-from instascrap.parse import extract_posts, extract_posts_counted
+from instascrap.parse import extract_posts, extract_posts_counted, has_profile_grid
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -241,7 +241,7 @@ def test_old_invented_container_yields_nothing():
     # edge_owner_to_timeline_media / shortcode / display_url was the pre-real-
     # capture invented shape (see the deleted web_profile_info.json /
     # timeline_graphql.json fixtures). Pinning this documents that dropping it
-    # from _EDGE_CONTAINERS was deliberate, not an oversight.
+    # from PROFILE_GRID_CONTAINERS was deliberate, not an oversight.
     old_shaped = {
         "data": {"user": {"edge_owner_to_timeline_media": {"edges": [{"node": image_node()}]}}}
     }
@@ -254,3 +254,30 @@ def test_unrelated_payload_yields_nothing():
 
 def test_garbage_payload_does_not_raise():
     assert extract_posts({"totally": ["unexpected"]}, "alice") == []
+
+
+# --- has_profile_grid: what browser.py waits for during a profile visit ------
+
+def test_has_profile_grid_true_for_the_real_capture():
+    assert has_profile_grid(load("real_profile.json")) is True
+
+
+def test_has_profile_grid_false_for_a_home_feed_payload():
+    # The exact shape of the payload that masked the michellemonaghan defect:
+    # a different, real Instagram container (the home feed's), not a garbage
+    # or malformed one.
+    home_feed = {"data": {"xdt_api__v1__feed__timeline__connection": {"edges": [
+        {"node": image_node()}
+    ]}}}
+    assert has_profile_grid(home_feed) is False
+
+
+def test_has_profile_grid_finds_the_container_at_any_depth():
+    nested = {"wrapper": {"deeper": [{"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": []}}}]}}
+    assert has_profile_grid(nested) is True
+
+
+def test_has_profile_grid_false_for_unrelated_and_garbage_payloads():
+    assert has_profile_grid(load("unrelated.json")) is False
+    assert has_profile_grid({"totally": ["unexpected"]}) is False
+    assert has_profile_grid([1, 2, "x"]) is False

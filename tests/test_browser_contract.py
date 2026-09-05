@@ -4,7 +4,13 @@ import types
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from instascrap.browser import BlockedError, collect_payload
+from instascrap.browser import (
+    BlockedError,
+    PROFILE_GRID_POLL_S,
+    PROFILE_GRID_WAIT_TIMEOUT_S,
+    collect_payload,
+    wait_for_condition,
+)
 
 API = "https://www.instagram.com/api/v1/users/web_profile_info/?username=alice"
 
@@ -193,3 +199,130 @@ def test_goto_retries_a_transient_failure_and_succeeds_without_a_block(tmp_path,
 
     assert goto.calls == 2
     assert session._block is None
+
+
+# --- wait_for_condition, the pure poll loop visit_profile is built on ---------
+
+def test_wait_for_condition_returns_true_immediately_when_already_met():
+    calls = []
+    result = wait_for_condition(
+        is_met=lambda: True, is_aborted=lambda: False,
+        timeout_s=10.0, poll_s=1.0,
+    )
+    assert result is True
+
+
+def test_wait_for_condition_checks_abort_before_met_on_the_very_first_poll():
+    # An abort that is already true when the wait starts must win before
+    # is_met is even consulted -- this is what lets Session use it to check a
+    # block stashed before visit_profile's wait even begins.
+    met_calls = []
+    result = wait_for_condition(
+        is_met=lambda: met_calls.append(1) or True,
+        is_aborted=lambda: True,
+        timeout_s=10.0, poll_s=1.0,
+    )
+    assert result is False
+    assert met_calls == []
+
+
+def test_wait_for_condition_times_out_without_sleeping_past_the_bound(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda secs: sleeps.append(secs))
+    result = wait_for_condition(
+        is_met=lambda: False, is_aborted=lambda: False,
+        timeout_s=1.0, poll_s=0.25,
+    )
+    assert result is False
+    assert len(sleeps) == 4  # 1.0 / 0.25, exactly the bound, no extra poll
+
+
+def test_wait_for_condition_stops_polling_the_instant_met_turns_true(monkeypatch):
+    calls = []
+
+    def is_met():
+        calls.append(1)
+        return len(calls) == 3
+
+    monkeypatch.setattr(time, "sleep", lambda secs: None)
+    result = wait_for_condition(
+        is_met=is_met, is_aborted=lambda: False,
+        timeout_s=100.0, poll_s=1.0,
+    )
+    assert result is True
+    assert len(calls) == 3  # did not keep polling once satisfied
+
+
+# --- Session.visit_profile: waits for the grid, not a flat delay -------------
+#
+# This is the regression coverage for the production defect: michellemonaghan's
+# visit came back with only a stray home-feed payload because the flat 1.5-3.5s
+# sleep this replaced returned before the grid response arrived. These drive
+# visit_profile through a stubbed page.goto exactly like the goto-retry tests
+# above, and inject responses via session._on_response from inside a mocked
+# time.sleep to simulate a response arriving mid-wait.
+
+GRID_PAYLOAD = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": []}}}
+HOME_FEED_PAYLOAD = {"data": {"xdt_api__v1__feed__timeline__connection": {"edges": []}}}
+
+
+def test_visit_profile_returns_as_soon_as_the_grid_arrives(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(goto=lambda *a, **kw: None)
+
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) == 1:
+            session._on_response(FakeResponse(200, API, GRID_PAYLOAD))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    result = session.visit_profile("alice")
+
+    assert result == [GRID_PAYLOAD]
+    assert len(sleeps) == 1  # returned on the very next poll, not the full timeout
+
+
+def test_visit_profile_keeps_a_stray_payload_but_flags_the_grid_as_missing_by_giving_up(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    # visit_profile clears _captured on entry, so the stray payload has to
+    # arrive *after* that -- during the wait, via the goto stub, exactly like
+    # warm_up's leftover home-feed response would in a real session.
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(FakeResponse(200, API, HOME_FEED_PAYLOAD))
+    )
+
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda secs: sleeps.append(secs))
+
+    result = session.visit_profile("alice")
+
+    # The stray payload is not lost -- main.py's grid_missing check is what
+    # turns "captured something, but not the grid" into a reported anomaly;
+    # visit_profile's job is only to wait long enough and hand back whatever
+    # arrived.
+    assert result == [HOME_FEED_PAYLOAD]
+    assert len(sleeps) == round(PROFILE_GRID_WAIT_TIMEOUT_S / PROFILE_GRID_POLL_S)
+
+
+def test_visit_profile_surfaces_a_block_that_arrives_during_the_wait(tmp_path, monkeypatch):
+    goto_calls = []
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(goto=lambda *a, **kw: goto_calls.append(1))
+
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) == 1:
+            session._on_response(FakeResponse(429, "https://www.instagram.com/api/v1/x"))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    with pytest.raises(BlockedError, match="429"):
+        session.visit_profile("alice")
+
+    assert goto_calls == [1]  # a single navigation -- visit_profile never retries
+    assert len(sleeps) == 1   # the wait aborted immediately once the block landed

@@ -17,6 +17,15 @@ PAYLOAD = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edg
               "image_versions2": {"candidates": [
                   {"url": "https://cdn.test/AAA.jpg", "width": 100, "height": 100}]}}}]}}}
 
+# The payload that actually arrived for michellemonaghan in production: the home
+# feed's container (left over from warm_up), never the profile grid's. Same
+# general node shape, wrong container key entirely -- this is what a stray
+# response looks like, not a malformed one.
+HOME_FEED_PAYLOAD = {"data": {"xdt_api__v1__feed__timeline__connection": {"edges": [
+    {"node": {"code": "ZZZ", "taken_at": 1756729800, "media_type": 1,
+              "image_versions2": {"candidates": [
+                  {"url": "https://cdn.test/ZZZ.jpg", "width": 100, "height": 100}]}}}]}}}
+
 def cfg_for(tmp_path, accounts=("alice", "bob")):
     return Config(accounts=accounts, data_dir=tmp_path / "data",
                   publish_dir=tmp_path / "pub", public_base_url="https://example.test",
@@ -234,8 +243,36 @@ def test_empty_visit_is_reported_not_swallowed(tmp_path):
     cfg = cfg_for(tmp_path)
     store = Store(cfg.data_dir)
     result = run_session(cfg, store, FakeSession(empty_for=("alice",)), NOW)
-    assert result.empty_visits == ["alice"]
+    assert result.grid_missing == ["alice"]
     assert result.visited == ["alice", "bob"]   # still rotates on
+
+
+def test_stray_home_feed_payload_does_not_mask_a_missing_grid(tmp_path):
+    # The actual production defect: michellemonaghan's visit captured *a*
+    # payload (the home feed's, left over from warm_up), just never the
+    # profile grid's. `payloads` is non-empty, so the old "empty_visits" check
+    # (zero payloads captured) would have reported nothing wrong at all --
+    # this is the regression test for the fix that replaced it.
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    store = Store(cfg.data_dir)
+    result = run_session(cfg, store, FakeSession(payloads=[HOME_FEED_PAYLOAD]), NOW)
+    assert result.grid_missing == ["alice"]
+    assert result.new_posts == 0
+    assert result.dropped_nodes == 0  # a wrong container, not a malformed node
+
+
+def test_a_quiet_profile_with_no_new_posts_is_not_flagged_as_grid_missing(tmp_path):
+    # The false-positive guard: a profile that genuinely has nothing new still
+    # sends back a grid payload (its edges are just all already known), and
+    # that must stay silent -- the whole point of grid_missing is to notify
+    # on the anomaly, not on the normal case it exists to be distinguished
+    # from.
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    store = Store(cfg.data_dir)
+    run_session(cfg, store, FakeSession(payloads=[PAYLOAD]), NOW)
+    result = run_session(cfg, store, FakeSession(payloads=[PAYLOAD]), NOW + timedelta(hours=8))
+    assert result.new_posts == 0
+    assert result.grid_missing == []
 
 
 def test_dropped_nodes_are_counted(tmp_path):
