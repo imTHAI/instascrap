@@ -24,6 +24,13 @@ class BlockedError(RuntimeError):
     """Instagram pushed back. Never retried — the session ends here."""
 
 
+class MediaFetchError(RuntimeError):
+    """A media download failed for an ordinary reason (CDN hiccup, 404, 5xx).
+
+    Distinct from BlockedError on purpose: this one is isolated and skipped by
+    the orchestrator, whereas a BlockedError ends the whole session."""
+
+
 def collect_payload(status: int, url: str, payload: dict | None) -> dict | None:
     """Decide what to do with one intercepted response. Pure, hence testable."""
     reason = detect_block(status, payload, url)
@@ -85,33 +92,60 @@ class Session:
         if captured is not None:
             self._captured.append(captured)
 
+    def _raise_if_blocked(self) -> None:
+        """Checked at every boundary of every phase, not just at the end of a
+        navigation. Responses keep arriving during the media-fetch phase, which
+        can run for tens of seconds, and a block that lands there must never be
+        carried silently into the next profile."""
+        if self._block is not None:
+            raise self._block
+
     def _pause(self, low: float, high: float) -> None:
         time.sleep(random.uniform(low, high))
 
     def warm_up(self) -> None:
         """Land on the home feed and scroll a little before touching any profile.
         Costs nothing and makes the session read as a visit rather than a sweep."""
+        # The only place _block is ever cleared. A block is a property of the
+        # session, not of one navigation: clearing it on entry to visit_profile
+        # (as this used to) threw away a 429 that arrived while the previous
+        # profile's media were downloading, and then navigated anyway.
         self._block = None
         self.page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
         for _ in range(random.randint(2, 3)):
             self._pause(2, 6)
             self.page.mouse.wheel(0, random.randint(600, 1200))
         self._pause(2, 6)
-        if self._block:
-            raise self._block
+        self._raise_if_blocked()
 
     def visit_profile(self, account: str) -> list[dict]:
+        self._raise_if_blocked()
         self._captured = []
-        self._block = None
         self.page.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded")
         self.page.wait_for_timeout(random.randint(1500, 3500))
-        if self._block:
-            raise self._block
+        self._raise_if_blocked()
         return list(self._captured)
 
     def fetch_media(self, url: str) -> bytes:
+        self._raise_if_blocked()
         # Through the browser context, so the request carries its cookies and headers.
-        return self.context.request.get(url).body()
+        # APIRequestContext traffic never reaches page.on("response"), so media —
+        # most of a session by request count — would otherwise bypass block
+        # detection entirely. The status is run through detect_block by hand.
+        response = self.context.request.get(url)
+        reason = detect_block(response.status, None, response.url)
+        if reason:
+            raise BlockedError(reason)
+        if response.status != 200:
+            # APIResponse.body() does not raise on a non-2xx: it hands back the
+            # error page. Writing that to disk would produce a permanently broken
+            # 0.jpg, because save_post never rewrites a file that already exists.
+            raise MediaFetchError(f"HTTP {response.status} fetching {url}")
+        body = response.body()
+        self._raise_if_blocked()
+        return body
 
     def gap(self) -> None:
+        self._raise_if_blocked()
         self._pause(self.cfg.min_gap_seconds, self.cfg.max_gap_seconds)
+        self._raise_if_blocked()
