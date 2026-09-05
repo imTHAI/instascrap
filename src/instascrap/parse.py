@@ -21,15 +21,26 @@ def _caption(node: dict) -> str:
 
 
 def _media_from_node(node: dict) -> Media:
-    is_video = bool(node.get("is_video"))
     dims = node.get("dimensions", {})
+    display_url = node.get("display_url")
+    video_url = node.get("video_url")
+    # Profile-grid nodes routinely carry is_video: true with no video_url — the
+    # grid only ever ships the cover frame, and the playable URL arrives on the
+    # post page. Requiring video_url here dropped every video post silently, so
+    # the flag alone is not enough: it is a video only if there is something to
+    # play, otherwise the cover image stands in and the post survives.
+    is_video = bool(node.get("is_video")) and bool(video_url)
+    url = video_url if is_video else display_url
+    if not url:
+        raise KeyError("node carries neither video_url nor display_url")
     return Media(
         kind="video" if is_video else "image",
-        url=node["video_url"] if is_video else node["display_url"],
+        url=url,
         width=int(dims.get("width", 0)),
         height=int(dims.get("height", 0)),
         duration=float(node["video_duration"]) if is_video and "video_duration" in node else None,
         path=None,
+        poster_url=display_url if is_video else None,
     )
 
 
@@ -74,20 +85,35 @@ def _walk_edges(obj) -> list[dict]:
     return found
 
 
-def extract_posts(payload: dict, account: str) -> list[Post]:
-    posts = []
+def extract_posts_counted(payload: dict, account: str) -> tuple[list[Post], int]:
+    """Posts plus the number of nodes that were skipped.
+
+    The count is the whole point: a silent skip is how a reshaped Instagram
+    response turns into feeds that quietly stop growing. The caller logs it, and
+    a session that drops everything it sees is visible in the logs on the day it
+    starts rather than three weeks later."""
+    posts: list[Post] = []
+    dropped = 0
     for edge in _walk_edges(payload):
         node = edge.get("node") if isinstance(edge, dict) else None
         if not isinstance(node, dict):
+            dropped += 1
             continue
         try:
             post = _post_from_node(node, account)
         except (KeyError, TypeError, ValueError):
             # A malformed node must never abort a whole session's harvest.
+            dropped += 1
             continue
-        if post is not None:
-            posts.append(post)
-    return posts
+        if post is None:
+            dropped += 1
+            continue
+        posts.append(post)
+    return posts, dropped
+
+
+def extract_posts(payload: dict, account: str) -> list[Post]:
+    return extract_posts_counted(payload, account)[0]
 
 
 _BLOCK_MARKERS = ("feedback_required", "challenge_required")

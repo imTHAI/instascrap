@@ -78,3 +78,41 @@ def test_archive_raw_collisions_sort_in_write_order(tmp_path):
     written = [store.archive_raw("alice", {"page": n}, NOW) for n in (1, 2, 3)]
     on_disk = sorted(p.name for p in (tmp_path / "raw/alice").iterdir())
     assert on_disk == [p.name for p in written]
+
+
+def test_video_poster_is_downloaded_alongside_the_video(tmp_path):
+    post = Post(
+        shortcode="VID", account="alice", timestamp_utc=NOW, caption="",
+        permalink="https://www.instagram.com/p/VID/",
+        media=(Media("video", "https://cdn.test/v.mp4", 1080, 1920, 5.0, None,
+                     poster_url="https://cdn.test/v.jpg"),),
+        is_carousel=False, like_count=0, comment_count=0,
+    )
+    saved = Store(tmp_path).save_post(
+        post, {"https://cdn.test/v.mp4": b"mp4", "https://cdn.test/v.jpg": b"jpeg"})
+    assert saved.media[0].poster_path == "media/alice/VID/0_poster.jpg"
+    assert (tmp_path / saved.media[0].poster_path).read_bytes() == b"jpeg"
+
+
+def test_missing_poster_bytes_do_not_lose_the_post(tmp_path):
+    post = Post(
+        shortcode="VID", account="alice", timestamp_utc=NOW, caption="",
+        permalink="https://www.instagram.com/p/VID/",
+        media=(Media("video", "https://cdn.test/v.mp4", 1080, 1920, 5.0, None,
+                     poster_url="https://cdn.test/v.jpg"),),
+        is_carousel=False, like_count=0, comment_count=0,
+    )
+    saved = Store(tmp_path).save_post(post, {"https://cdn.test/v.mp4": b"mp4"})
+    assert saved.media[0].path == "media/alice/VID/0.mp4"
+    assert saved.media[0].poster_path is None
+
+
+def test_post_json_is_written_and_read_as_utf8(tmp_path):
+    store = Store(tmp_path)
+    store.save_post(dataclasses_replace_caption(make_post(), "Café — 東京 ✨"), BYTES)
+    assert store.load_posts("alice")[0].caption == "Café — 東京 ✨"
+
+
+def dataclasses_replace_caption(post, caption):
+    import dataclasses
+    return dataclasses.replace(post, caption=caption)

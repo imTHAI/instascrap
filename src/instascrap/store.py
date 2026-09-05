@@ -7,17 +7,22 @@ mid-write when the container is stopped."""
 import dataclasses
 import gzip
 import json
+import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 from .models import Post
 
+log = logging.getLogger(__name__)
+
 FIRST_BACKOFF = timedelta(hours=24)
 REPEAT_BACKOFF = timedelta(hours=72)
 
 _EXT = {"image": ".jpg", "video": ".mp4"}
+
+_DEFAULT_STATE = {"visited": {}, "block": None, "last_new_post": None, "first_run_at": None}
 
 
 class Store:
@@ -25,15 +30,59 @@ class Store:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.data_dir / "state.json"
+        if not self.state_path.exists():
+            # The staleness watchdog needs a clock to measure from. Seeded here,
+            # at deployment, because last_new_post only ever gets set once a post
+            # has been captured — so on a fresh install with a broken parser (the
+            # most likely first failure, the fixtures being hand-written) the
+            # watchdog would have stayed inert forever, which is precisely the
+            # silence it exists to break.
+            state = dict(_DEFAULT_STATE)
+            state["first_run_at"] = datetime.now(timezone.utc).isoformat()
+            self._write(state)
 
     def _read(self) -> dict:
+        """Never raises. A corrupt state.json used to take down every subsequent
+        run, turning one bad write into a permanent outage."""
         if not self.state_path.exists():
-            return {"visited": {}, "block": None, "last_new_post": None}
-        return json.loads(self.state_path.read_text())
+            return dict(_DEFAULT_STATE)
+        try:
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            log.error("state.json unreadable (%s); starting from defaults", exc)
+            self._quarantine_state()
+            return dict(_DEFAULT_STATE)
+        if not isinstance(state, dict):
+            log.error("state.json is not an object; starting from defaults")
+            self._quarantine_state()
+            return dict(_DEFAULT_STATE)
+
+        merged = {**_DEFAULT_STATE, **state}
+        # Per-field repair rather than wholesale reset: a schema drift in one key
+        # must not throw away the visit history or, worse, an active backoff.
+        if not isinstance(merged.get("visited"), dict):
+            log.warning("state.json: 'visited' has the wrong shape, reset")
+            merged["visited"] = {}
+        block = merged.get("block")
+        if block is not None and not (isinstance(block, dict) and isinstance(block.get("until"), str)):
+            log.warning("state.json: 'block' has the wrong shape, reset")
+            merged["block"] = None
+        for key in ("last_new_post", "first_run_at"):
+            if merged.get(key) is not None and not isinstance(merged[key], str):
+                merged[key] = None
+        return merged
+
+    def _quarantine_state(self) -> None:
+        """Keep the bad file for forensics; it is the only record of an active
+        backoff, and losing one silently would mean browsing during a block."""
+        try:
+            os.replace(self.state_path, self.state_path.with_suffix(".json.corrupt"))
+        except OSError as exc:
+            log.warning("could not set the corrupt state.json aside: %s", exc)
 
     def _write(self, state: dict) -> None:
         tmp = self.state_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self.state_path)
 
     # --- rotation -------------------------------------------------------
@@ -52,7 +101,13 @@ class Store:
 
     def blocked_until(self) -> datetime | None:
         block = self._read()["block"]
-        return datetime.fromisoformat(block["until"]) if block else None
+        if not block:
+            return None
+        try:
+            return datetime.fromisoformat(block["until"])
+        except (TypeError, ValueError):
+            log.error("state.json: unparseable block deadline %r, ignoring", block.get("until"))
+            return None
 
     def record_block(self, reason: str, now: datetime) -> datetime:
         state = self._read()
@@ -71,7 +126,13 @@ class Store:
 
     def last_new_post_at(self) -> datetime | None:
         value = self._read()["last_new_post"]
-        return datetime.fromisoformat(value) if value else None
+        return _parse_iso(value)
+
+    def silence_since(self) -> datetime | None:
+        """The instant the watchdog measures its 7-day window from: the last post
+        captured, or failing that the day this install first ran."""
+        state = self._read()
+        return _parse_iso(state["last_new_post"] or state["first_run_at"])
 
     def mark_new_post(self, now: datetime) -> None:
         state = self._read()
@@ -100,7 +161,21 @@ class Store:
             # mtimes and hard links untouched.
             if not target.exists():
                 self._write_bytes_atomic(target, media_bytes[media.url])
-            stored.append(dataclasses.replace(media, path=rel))
+
+            poster_rel = None
+            if media.poster_url:
+                poster_rel = f"media/{post.account}/{post.shortcode}/{index}_poster.jpg"
+                poster_target = self.data_dir / poster_rel
+                if not poster_target.exists():
+                    poster_bytes = media_bytes.get(media.poster_url)
+                    if poster_bytes is None:
+                        # A cover frame is a nice-to-have; the video still plays
+                        # without one. Never lose the post over a missing poster.
+                        poster_rel = None
+                    else:
+                        self._write_bytes_atomic(poster_target, poster_bytes)
+
+            stored.append(dataclasses.replace(media, path=rel, poster_path=poster_rel))
 
         saved = dataclasses.replace(post, media=tuple(stored))
 
@@ -125,7 +200,8 @@ class Store:
         directory = self._posts_dir(account)
         if not directory.exists():
             return []
-        posts = [Post.from_dict(json.loads(p.read_text())) for p in directory.glob("*.json")]
+        posts = [Post.from_dict(json.loads(p.read_text(encoding="utf-8")))
+                 for p in directory.glob("*.json")]
         posts.sort(key=lambda p: p.timestamp_utc, reverse=True)
         return posts[:limit] if limit else posts
 
@@ -148,3 +224,13 @@ class Store:
             suffix += 1
         self._write_bytes_atomic(path, gzip.compress(json.dumps(payload).encode()))
         return path
+
+
+def _parse_iso(value) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        log.error("state.json: unparseable timestamp %r, ignoring", value)
+        return None

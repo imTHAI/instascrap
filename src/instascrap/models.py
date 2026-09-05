@@ -15,6 +15,13 @@ class Media:
     duration: float | None
     # Relative to the data dir; None until store.py has written the bytes.
     path: str | None
+    # Videos only: the cover frame. The feed needs it because <video
+    # preload="none"> renders as a black rectangle until tapped, and the URL is
+    # only obtainable at capture time — Instagram hands it over once, in the same
+    # node as the video. Both default to None so archives written before this
+    # field existed still load through from_dict().
+    poster_url: str | None = None
+    poster_path: str | None = None
 
 
 @dataclass(frozen=True)

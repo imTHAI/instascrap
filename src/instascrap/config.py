@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PREFIX_RE = re.compile(r"^[0-9a-f]{16}$")
+# Account names are concatenated straight into filesystem paths (posts/<account>/,
+# media/<account>/) and into public URLs, so they are validated at the door rather
+# than sanitised at every use site. This is Instagram's own username charset.
+ACCOUNT_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 
 
 @dataclass(frozen=True)
@@ -23,11 +27,20 @@ class Config:
 
 
 def load_config(path: Path) -> Config:
-    raw = tomllib.loads(Path(path).read_text())
+    # Binary mode with tomllib.load, not read_text + loads: TOML is defined as
+    # UTF-8, and letting the platform locale decode the file is how a container
+    # running under LANG=C fails on an accented comment.
+    with open(path, "rb") as handle:
+        raw = tomllib.load(handle)
 
     accounts = tuple(raw["accounts"])
     if not accounts:
         raise ValueError("accounts must not be empty")
+    for account in accounts:
+        # `.` and `..` match the charset but would escape or collapse the archive
+        # tree; no real Instagram username looks like that anyway.
+        if not isinstance(account, str) or not ACCOUNT_RE.match(account) or account in (".", ".."):
+            raise ValueError(f"invalid account name: {account!r}")
 
     prefix = raw["public_prefix"]
     if not PREFIX_RE.match(prefix):
