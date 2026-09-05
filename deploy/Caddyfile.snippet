@@ -1,0 +1,22 @@
+# Add this block to the existing Caddyfile (/mnt/user/appdata/caddy/config/Caddyfile)
+# and reload Caddy. The Caddy container already bind-mounts
+# /mnt/user/appdata/caddy/site -> /usr/share/caddy (see `docker inspect Caddy`),
+# so the `root` below lines up with instascrap's PUBLISH mount without any extra
+# volume changes on the Caddy side.
+#
+# Deliberately does not hardcode the public_prefix anywhere in this file: the
+# prefix is a bearer secret from config.toml, and Caddy doesn't need to know its
+# value to serve it -- try_files below resolves whatever path the client actually
+# requests against files already on disk. That keeps the secret out of a config
+# file that has held a leaked credential before (the tunnel token was displayed
+# in clear during design -- see Step 9's regeneration note).
+feeds.example.com {
+	root * /usr/share/caddy/instacrap
+	# Pretty URLs for feed readers: /<prefix>/<account> resolves to the real
+	# <account>.xml (also serves /<prefix>/all.xml and every hardlinked media
+	# file under /<prefix>/media/... unchanged, since those already exist and
+	# are matched by the first try_files argument).
+	try_files {path} {path}.xml
+	file_server
+	import security_headers
+}
