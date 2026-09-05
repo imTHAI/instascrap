@@ -4,10 +4,13 @@ convention (launching a real browser is out of scope for unit tests), but the
 policy it relies on is a plain function of a callable and a classifier, so
 it is fully testable without Playwright."""
 
+import time
+
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 import pytest
 
+from instascrap import browser
 from instascrap.browser import BlockedError, is_transient_navigation_error, retry_transient
 
 
@@ -113,3 +116,14 @@ def test_on_retry_receives_attempt_number_and_exception():
     retry_transient(fn, is_transient_navigation_error, sleep=lambda: None,
                      on_retry=lambda n, exc: seen.append(n))
     assert seen == [1, 2]
+
+
+def test_retry_pause_sleeps_within_its_declared_seconds_not_the_inter_profile_gap(monkeypatch):
+    # Cheap bounds check, not a statistical one: monkeypatches time.sleep so the
+    # test costs nothing, and pins the pause to "a few seconds" so nobody
+    # widens it towards the 25-90s inter-profile gap without a test noticing.
+    captured = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: captured.append(seconds))
+    browser._retry_pause()
+    assert len(captured) == 1
+    assert 1.0 <= captured[0] <= 3.0

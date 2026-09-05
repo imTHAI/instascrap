@@ -67,7 +67,10 @@ def _retry_pause() -> None:
     time.sleep(random.uniform(1.0, 3.0))
 
 
-def retry_transient(fn, is_transient, *, attempts: int = 3, sleep=_retry_pause, on_retry=None):
+NAV_RETRY_ATTEMPTS = 3  # at most two retries, three attempts total
+
+
+def retry_transient(fn, is_transient, *, attempts: int = NAV_RETRY_ATTEMPTS, sleep=_retry_pause, on_retry=None):
     """Call `fn()` up to `attempts` times total, retrying only exceptions that
     `is_transient` accepts. Anything `is_transient` rejects — most importantly
     a `BlockedError`, which no classifier here ever accepts — propagates from
@@ -154,13 +157,24 @@ class Session:
     def goto(self, url: str, **kwargs) -> None:
         """Navigate with a bounded retry for transport-level failures only.
 
-        Chrome's first navigation of a session races Xvfb/x11vnc/websockify
-        binding their sockets against Chrome's own network stack coming up —
-        observed in production as ERR_NETWORK_CHANGED and as a
+        Deliberately used only for the session's *first* navigation
+        (warm_up's goto, and the --login path in main.py) — the race this
+        exists for is Chrome's first navigation of a session against
+        Xvfb/x11vnc/websockify still binding sockets right after container
+        start, observed in production as ERR_NETWORK_CHANGED and as a
         domcontentloaded that never fires within the 30s default timeout.
-        Retrying is safe here specifically because those failures mean no
-        HTTP response ever arrived: detect_block had nothing to examine, so
-        Instagram never got the chance to refuse anything.
+        There is no evidence of that race recurring mid-session, and
+        visit_profile() already has a graceful path for an ordinary
+        navigation failure — the account is logged, marked visited so the
+        rotation still advances, and the session moves on — so retrying
+        there would spend up to ~90s of extra requests against Instagram
+        buying protection against a failure mode nothing points at. Do not
+        widen this to visit_profile() without new evidence of the race
+        happening there.
+
+        Retrying is safe here specifically because a timeout or net::ERR_*
+        means no HTTP response ever arrived: detect_block had nothing to
+        examine, so Instagram never got the chance to refuse anything.
 
         A stashed block always wins over a transient error, on every attempt:
         each attempt starts by checking for one, so a block that arrived
@@ -174,11 +188,12 @@ class Session:
             self.page.goto(url, **kwargs)
 
         def on_retry(attempt_no: int, exc: Exception) -> None:
-            log.warning("navigation to %s failed (attempt %d/3): %s — retrying",
-                        url, attempt_no, exc)
+            log.warning("navigation to %s failed (attempt %d/%d): %s — retrying",
+                        url, attempt_no, NAV_RETRY_ATTEMPTS, exc)
 
         try:
-            retry_transient(attempt, is_transient_navigation_error, on_retry=on_retry)
+            retry_transient(attempt, is_transient_navigation_error,
+                             attempts=NAV_RETRY_ATTEMPTS, on_retry=on_retry)
         except BlockedError:
             raise
         except Exception:  # noqa: BLE001 — re-raised as-is unless a block supersedes it
@@ -203,7 +218,14 @@ class Session:
     def visit_profile(self, account: str) -> list[dict]:
         self._raise_if_blocked()
         self._captured = []
-        self.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded")
+        # Single attempt, deliberately: the startup race goto() retries for is
+        # specific to a session's first navigation, and a mid-session failure
+        # here already has a graceful path (see _visit_account in main.py) —
+        # the account is skipped and marked visited, and the rotation moves
+        # on. Retrying up to ~90s here would trade that cheap fallback for
+        # extra requests against Instagram with no evidence the race recurs
+        # mid-session.
+        self.page.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded")
         self.page.wait_for_timeout(random.randint(1500, 3500))
         self._raise_if_blocked()
         return list(self._captured)
