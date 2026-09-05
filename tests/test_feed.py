@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta, timezone
 import feedparser
 from instascrap.config import Config
@@ -82,3 +83,71 @@ def test_feed_respects_item_limit(tmp_path):
     publish(store, cfg)
     parsed = feedparser.parse((cfg.publish_dir / cfg.public_prefix / "alice.xml").read_text())
     assert len(parsed.entries) == 2
+
+
+def video_post(shortcode="VID", poster="media/alice/VID/0_poster.jpg"):
+    return Post(
+        shortcode=shortcode, account="alice", timestamp_utc=NOW, caption="",
+        permalink=f"https://www.instagram.com/p/{shortcode}/",
+        media=(Media("video", "https://cdn.test/v.mp4", 1080, 1920, 5.0,
+                     f"media/alice/{shortcode}/0.mp4", poster_url="https://cdn.test/v.jpg",
+                     poster_path=poster),),
+        is_carousel=False, like_count=0, comment_count=0,
+    )
+
+
+def test_video_carries_a_poster(tmp_path):
+    xml = build_feed("alice", [video_post()], cfg_for(tmp_path))
+    assert "poster=" in xml
+    assert "https://example.test/0123456789abcdef/media/alice/VID/0_poster.jpg" in xml
+
+
+def test_video_without_a_poster_still_renders(tmp_path):
+    xml = build_feed("alice", [video_post(poster=None)], cfg_for(tmp_path))
+    assert "poster=" not in xml
+    assert "<video" in xml or "&lt;video" in xml
+
+
+def test_caption_newlines_become_line_breaks(tmp_path):
+    xml = build_feed("alice", [post("AAA", caption="ligne un\nligne deux")], cfg_for(tmp_path))
+    assert "&lt;br&gt;" in xml or "<br>" in xml
+
+
+def test_all_feed_id_matches_the_file_it_is_written_to(tmp_path):
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    store.save_post(post("AAA"), {"https://cdn.test/AAA.jpg": b"jpeg"})
+    publish(store, cfg)
+    xml = (cfg.publish_dir / cfg.public_prefix / "all.xml").read_text()
+    assert 'href="https://example.test/0123456789abcdef/all.xml" rel="self"' in xml
+    urls = re.findall(r'(?:href|url)="([^"]*)"', xml)
+    assert urls and all(" " not in url for url in urls)   # the display name never leaks into a URL
+    assert feedparser.parse(xml).feed.title == "Instagram — tous les comptes"
+
+
+def test_enclosure_reports_the_real_byte_length(tmp_path):
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    store.save_post(post("AAA"), {"https://cdn.test/AAA.jpg": b"jpegjpegjpeg"})
+    parsed = feedparser.parse(build_feed("alice", store.load_posts("alice"), cfg))
+    assert parsed.entries[0].enclosures[0]["length"] == str(len(b"jpegjpegjpeg"))
+
+
+def test_feeds_are_written_atomically(tmp_path):
+    # A reader polling the directory Caddy serves must never see a partial file.
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    store.save_post(post("AAA"), {"https://cdn.test/AAA.jpg": b"jpeg"})
+    publish(store, cfg)
+    out = cfg.publish_dir / cfg.public_prefix
+    assert not list(out.glob("*.tmp"))
+    assert feedparser.parse((out / "alice.xml").read_text()).bozo is False
+
+
+def test_publish_hardlinks_video_posters(tmp_path):
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    store.save_post(video_post(), {"https://cdn.test/v.mp4": b"mp4",
+                                   "https://cdn.test/v.jpg": b"jpeg"})
+    publish(store, cfg)
+    assert (cfg.publish_dir / cfg.public_prefix / "media/alice/VID/0_poster.jpg").read_bytes() == b"jpeg"

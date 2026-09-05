@@ -25,21 +25,48 @@ def _describe(post: Post, cfg: Config) -> str:
         url = escape(_public_url(cfg, media.path), quote=True)
         if media.kind == "video":
             # preload="none" matters: News Explorer would otherwise pull every
-            # video in the list view.
-            parts.append(f'<video controls preload="none" width="{media.width}" src="{url}"></video>')
+            # video in the list view. It also means the element paints nothing at
+            # all until tapped, so the poster is what makes the entry readable.
+            poster = ""
+            if media.poster_path:
+                poster = f' poster="{escape(_public_url(cfg, media.poster_path), quote=True)}"'
+            parts.append(
+                f'<video controls preload="none"{poster} width="{media.width}" src="{url}"></video>'
+            )
         else:
             parts.append(f'<img src="{url}" width="{media.width}" height="{media.height}">')
     if post.caption:
-        parts.append(f"<p>{escape(post.caption)}</p>")
+        # Instagram captions are newline-separated paragraphs; without this they
+        # render as one run-on block in the reader.
+        parts.append(f"<p>{escape(post.caption).replace(chr(10), '<br>')}</p>")
     return "".join(parts)
 
 
-def build_feed(account: str, posts: Sequence[Post], cfg: Config) -> str:
+def _enclosure_length(cfg: Config, rel_path: str) -> int:
+    """RSS wants the real byte count. A literal 0 makes some readers skip the
+    enclosure outright, and tells the user nothing about download size."""
+    try:
+        return (cfg.data_dir / rel_path).stat().st_size
+    except OSError:
+        return 0
+
+
+def build_feed(account: str, posts: Sequence[Post], cfg: Config,
+               title: str | None = None, link: str | None = None,
+               description: str | None = None) -> str:
+    # `account` is the feed's slug, never its display name: it must match the file
+    # actually written, since the id and the self link are built from it. Passing
+    # "tous les comptes" here produced an id full of spaces pointing at a file
+    # that does not exist. Human-facing wording goes in `title`/`description`.
+    self_url = f"{cfg.public_base_url}/{cfg.public_prefix}/{account}.xml"
     generator = FeedGenerator()
-    generator.id(f"{cfg.public_base_url}/{cfg.public_prefix}/{account}.xml")
-    generator.title(f"Instagram — {account}")
-    generator.link(href=f"https://www.instagram.com/{account}/", rel="alternate")
-    generator.description(f"Posts de @{account}, réhébergés")
+    generator.id(self_url)
+    generator.title(title or f"Instagram — {account}")
+    generator.link(href=link or f"https://www.instagram.com/{account}/", rel="alternate")
+    # rel="self" is what makes the id verifiable from the feed itself; RSS drops
+    # the atom id, so without this the slug would be unobservable to a reader.
+    generator.link(href=self_url, rel="self")
+    generator.description(description or f"Posts de @{account}, réhébergés")
     generator.language("fr")
 
     # feedgen emits items in reverse insertion order, so insert oldest first.
@@ -54,10 +81,19 @@ def build_feed(account: str, posts: Sequence[Post], cfg: Config) -> str:
         entry.description(_describe(post, cfg))
         primary = post.media[0] if post.media else None
         if primary is not None and primary.path:
-            entry.enclosure(_public_url(cfg, primary.path), 0,
+            entry.enclosure(_public_url(cfg, primary.path),
+                            _enclosure_length(cfg, primary.path),
                             "video/mp4" if primary.kind == "video" else "image/jpeg")
 
     return generator.rss_str(pretty=True).decode()
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    # Caddy serves this directory live. A reader polling mid-write would otherwise
+    # get a truncated feed; everything else in the codebase already writes this way.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _hardlink(source: Path, target: Path) -> None:
@@ -82,18 +118,22 @@ def publish(store: Store, cfg: Config) -> list[Path]:
         everything.extend(posts)
 
         path = out_dir / f"{account}.xml"
-        path.write_text(build_feed(account, posts, cfg), encoding="utf-8")
+        _write_text_atomic(path, build_feed(account, posts, cfg))
         written.append(path)
 
         for post in posts:
             for media in post.media:
-                if media.path:
-                    _hardlink(store.data_dir / media.path, out_dir / media.path)
+                for rel in (media.path, media.poster_path):
+                    if rel:
+                        _hardlink(store.data_dir / rel, out_dir / rel)
 
     everything.sort(key=lambda p: p.timestamp_utc, reverse=True)
     all_path = out_dir / "all.xml"
-    all_path.write_text(
-        build_feed("tous les comptes", everything[:cfg.feed_items], cfg), encoding="utf-8"
-    )
+    _write_text_atomic(all_path, build_feed(
+        "all", everything[:cfg.feed_items], cfg,
+        title="Instagram — tous les comptes",
+        link="https://www.instagram.com/",
+        description="Tous les comptes suivis, réhébergés",
+    ))
     written.append(all_path)
     return written
