@@ -261,7 +261,7 @@ def _dispatch(args, cfg: Config) -> int:
     if args.login:
         _warn_if_blocked(store, now)
         with Session(cfg, profile_dir, headless=False) as session:
-            session.page.goto("https://www.instagram.com/accounts/login/")
+            session.goto("https://www.instagram.com/accounts/login/")
             log.info("log in manually, then press Enter here")
             input()
         return EXIT_OK

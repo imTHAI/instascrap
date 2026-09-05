@@ -10,6 +10,8 @@ import random
 import time
 from pathlib import Path
 
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from .config import Config
@@ -39,6 +41,52 @@ def collect_payload(status: int, url: str, payload: dict | None) -> dict | None:
     if payload is None or not any(marker in url for marker in API_MARKERS):
         return None
     return payload
+
+
+def is_transient_navigation_error(exc: Exception) -> bool:
+    """True only when no HTTP response was ever received for a navigation: a
+    Playwright timeout, or a transport-level `net::ERR_*` surfaced as a plain
+    Playwright Error. In both cases `detect_block` never ran against anything
+    — there was no response to examine — so nothing was refused, which is
+    exactly what makes a retry safe.
+
+    A `BlockedError` is neither of these: it is a RuntimeError, not a
+    PlaywrightError subclass, so it always falls through to False here no
+    matter what its message says. That is deliberate, not incidental — it is
+    what keeps a refusal from ever being retried."""
+    if isinstance(exc, PlaywrightTimeoutError):
+        return True
+    return isinstance(exc, PlaywrightError) and "net::ERR_" in str(exc)
+
+
+def _retry_pause() -> None:
+    # Seconds, not the 25-90s inter-profile gap: this covers a startup race
+    # (Xvfb/x11vnc/websockify binding sockets, Chrome's own network stack
+    # coming up) while the session's first navigation is already in flight —
+    # not a courtesy pause to Instagram, so it stays short.
+    time.sleep(random.uniform(1.0, 3.0))
+
+
+def retry_transient(fn, is_transient, *, attempts: int = 3, sleep=_retry_pause, on_retry=None):
+    """Call `fn()` up to `attempts` times total, retrying only exceptions that
+    `is_transient` accepts. Anything `is_transient` rejects — most importantly
+    a `BlockedError`, which no classifier here ever accepts — propagates from
+    whichever attempt raised it, with no sleep and no further attempts. That
+    is the one property the whole project depends on, so it is enforced here
+    once rather than in every call site.
+
+    `fn` and `sleep` are 0-arg callables and `is_transient` takes the caught
+    exception; all three are injected so this stays pure and so tests never
+    burn wall-clock time or touch a browser."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 — classified by is_transient, not swallowed
+            if not is_transient(exc) or attempt == attempts:
+                raise
+            if on_retry is not None:
+                on_retry(attempt, exc)
+            sleep()
 
 
 class Session:
@@ -103,6 +151,40 @@ class Session:
     def _pause(self, low: float, high: float) -> None:
         time.sleep(random.uniform(low, high))
 
+    def goto(self, url: str, **kwargs) -> None:
+        """Navigate with a bounded retry for transport-level failures only.
+
+        Chrome's first navigation of a session races Xvfb/x11vnc/websockify
+        binding their sockets against Chrome's own network stack coming up —
+        observed in production as ERR_NETWORK_CHANGED and as a
+        domcontentloaded that never fires within the 30s default timeout.
+        Retrying is safe here specifically because those failures mean no
+        HTTP response ever arrived: detect_block had nothing to examine, so
+        Instagram never got the chance to refuse anything.
+
+        A stashed block always wins over a transient error, on every attempt:
+        each attempt starts by checking for one, so a block that arrived
+        during a previous failed attempt aborts the retry instead of
+        navigating again; and if the error that finally propagates out of
+        retry_transient is a transient one, the block is checked once more
+        before letting it through, in case it arrived during that very last
+        attempt (which never gets a next attempt to catch it at the top)."""
+        def attempt() -> None:
+            self._raise_if_blocked()
+            self.page.goto(url, **kwargs)
+
+        def on_retry(attempt_no: int, exc: Exception) -> None:
+            log.warning("navigation to %s failed (attempt %d/3): %s — retrying",
+                        url, attempt_no, exc)
+
+        try:
+            retry_transient(attempt, is_transient_navigation_error, on_retry=on_retry)
+        except BlockedError:
+            raise
+        except Exception:  # noqa: BLE001 — re-raised as-is unless a block supersedes it
+            self._raise_if_blocked()
+            raise
+
     def warm_up(self) -> None:
         """Land on the home feed and scroll a little before touching any profile.
         Costs nothing and makes the session read as a visit rather than a sweep."""
@@ -111,7 +193,7 @@ class Session:
         # (as this used to) threw away a 429 that arrived while the previous
         # profile's media were downloading, and then navigated anyway.
         self._block = None
-        self.page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
+        self.goto("https://www.instagram.com/", wait_until="domcontentloaded")
         for _ in range(random.randint(2, 3)):
             self._pause(2, 6)
             self.page.mouse.wheel(0, random.randint(600, 1200))
@@ -121,7 +203,7 @@ class Session:
     def visit_profile(self, account: str) -> list[dict]:
         self._raise_if_blocked()
         self._captured = []
-        self.page.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded")
+        self.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded")
         self.page.wait_for_timeout(random.randint(1500, 3500))
         self._raise_if_blocked()
         return list(self._captured)
