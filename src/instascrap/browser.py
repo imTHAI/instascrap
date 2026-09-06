@@ -320,6 +320,35 @@ class Session:
         self._pause(2, 6)
         self._raise_if_blocked()
 
+    def _scroll_profile_grid(self) -> None:
+        """A few modest wheel movements with short, irregular pauses -- long
+        enough to read as a person glancing down a profile, short enough that
+        it cannot pull in a second page of the grid (see visit_profile's
+        docstring: only the first view is ever taken, on purpose).
+
+        Confirmed by hand against the production profile: a direct navigation
+        often renders the first grid page from server-side data without ever
+        issuing the GraphQL request this project intercepts -- no request, no
+        capture, no posts, while the page itself looks perfectly normal.
+        Scrolling is what makes that request fire; freezing for up to 30s on
+        a page that never asked for anything is also not something a human
+        does, so this replaces stillness with the same kind of motion
+        warm_up already uses on the home feed, just smaller and shorter: that
+        one is camouflage on a page nothing is extracted from, this one is
+        the trigger for the one payload the whole visit exists to capture.
+
+        Checked after every movement, not only before and after the whole
+        sequence: a response can land in the middle of this exactly as it
+        can during the grid wait right after it (Playwright keeps dispatching
+        response events the same way regardless of what Python code is
+        running), and a block found here must stop the session before
+        another wheel event fires -- not be discovered only once scrolling
+        has already run its course."""
+        for _ in range(random.randint(2, 3)):
+            self.page.mouse.wheel(0, random.randint(300, 600))
+            self._pause(0.5, 1.5)
+            self._raise_if_blocked()
+
     def visit_profile(self, account: str) -> list[dict]:
         self._raise_if_blocked()
         self._captured = []
@@ -332,6 +361,20 @@ class Session:
         # mid-session. This is still the one navigation of that single
         # attempt — only what happens *after* it changed.
         self.page.goto(f"https://www.instagram.com/{account}/", wait_until="domcontentloaded")
+        self._raise_if_blocked()
+        # Scroll before waiting, not interleaved with it or instead of it.
+        # Scrolling is what triggers the grid request in the first place (see
+        # _scroll_profile_grid's docstring), so it has to happen before there
+        # is anything to wait for -- interleaving wheel events into the poll
+        # loop below would mean the first several polls are guaranteed to
+        # fail no matter how short PROFILE_GRID_POLL_S is, for no benefit.
+        # And the bounded wait still runs afterwards unconditionally, rather
+        # than being skipped when scrolling "should" have been enough: it is
+        # the backstop for exactly the case scrolling cannot fix -- broken
+        # interception, a reshaped page, a request that fires but is slow --
+        # and folding it into the scroll loop would blur the one signal
+        # (has_profile_grid never arriving) that grid_missing depends on.
+        self._scroll_profile_grid()
         # Wait for the response that actually carries the grid, not a flat
         # delay: a flat 1.5-3.5s sleep is what let michellemonaghan's session
         # come back empty in production — the grid response hadn't arrived in

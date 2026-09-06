@@ -1,3 +1,4 @@
+import random
 import time
 import types
 
@@ -266,15 +267,33 @@ GRID_PAYLOAD = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": 
 HOME_FEED_PAYLOAD = {"data": {"xdt_api__v1__feed__timeline__connection": {"edges": []}}}
 
 
+def fake_page(goto):
+    """A stubbed page.goto plus a no-op mouse -- visit_profile now scrolls
+    before it waits, so anything driving it through a stubbed page needs a
+    mouse to scroll with, not just something to navigate with."""
+    return types.SimpleNamespace(goto=goto, mouse=types.SimpleNamespace(wheel=lambda *a, **kw: None))
+
+
+def _fix_scroll_count(monkeypatch, count):
+    """Scrolling's own movement count and distance both come from
+    random.randint, so pinning it down is what makes the sleep-count
+    assertions below exact instead of "somewhere between 2 and 3"."""
+    monkeypatch.setattr(random, "randint", lambda a, b: count)
+
+
 def test_visit_profile_returns_as_soon_as_the_grid_arrives(tmp_path, monkeypatch):
     session = make_session(tmp_path)
-    session.page = types.SimpleNamespace(goto=lambda *a, **kw: None)
+    session.page = fake_page(goto=lambda *a, **kw: None)
+    _fix_scroll_count(monkeypatch, 2)
 
     sleeps = []
 
     def fake_sleep(secs):
         sleeps.append(secs)
         if len(sleeps) == 1:
+            # Lands during the very first scroll pause -- scrolling is what
+            # triggers the request in production, so this is where it
+            # realistically arrives, not during the wait that follows.
             session._on_response(FakeResponse(200, API, GRID_PAYLOAD))
 
     monkeypatch.setattr(time, "sleep", fake_sleep)
@@ -282,7 +301,11 @@ def test_visit_profile_returns_as_soon_as_the_grid_arrives(tmp_path, monkeypatch
     result = session.visit_profile("alice")
 
     assert result == [GRID_PAYLOAD]
-    assert len(sleeps) == 1  # returned on the very next poll, not the full timeout
+    # Scrolling still runs its full, fixed sequence (2 movements, pinned
+    # above) even though the grid arrived on the very first one -- it is the
+    # trigger, not a polling loop of its own -- and the bounded wait
+    # afterwards then returns on its first check, consuming no extra sleep.
+    assert len(sleeps) == 2
 
 
 def test_visit_profile_keeps_a_stray_payload_but_flags_the_grid_as_missing_by_giving_up(tmp_path, monkeypatch):
@@ -290,9 +313,10 @@ def test_visit_profile_keeps_a_stray_payload_but_flags_the_grid_as_missing_by_gi
     # visit_profile clears _captured on entry, so the stray payload has to
     # arrive *after* that -- during the wait, via the goto stub, exactly like
     # warm_up's leftover home-feed response would in a real session.
-    session.page = types.SimpleNamespace(
+    session.page = fake_page(
         goto=lambda *a, **kw: session._on_response(FakeResponse(200, API, HOME_FEED_PAYLOAD))
     )
+    _fix_scroll_count(monkeypatch, 2)
 
     sleeps = []
     monkeypatch.setattr(time, "sleep", lambda secs: sleeps.append(secs))
@@ -304,7 +328,9 @@ def test_visit_profile_keeps_a_stray_payload_but_flags_the_grid_as_missing_by_gi
     # visit_profile's job is only to wait long enough and hand back whatever
     # arrived.
     assert result == [HOME_FEED_PAYLOAD]
-    assert len(sleeps) == round(PROFILE_GRID_WAIT_TIMEOUT_S / PROFILE_GRID_POLL_S)
+    # 2 scroll pauses (pinned above) plus the full bounded wait, since the
+    # grid genuinely never arrives in this scenario.
+    assert len(sleeps) == 2 + round(PROFILE_GRID_WAIT_TIMEOUT_S / PROFILE_GRID_POLL_S)
 
 
 
@@ -465,10 +491,18 @@ def test_a_prior_declared_login_does_not_leak_into_a_later_ordinary_visit(tmp_pa
         session.visit_profile("bob")
 
 
-def test_visit_profile_surfaces_a_block_that_arrives_during_the_wait(tmp_path, monkeypatch):
+def test_visit_profile_surfaces_a_block_that_arrives_mid_scroll(tmp_path, monkeypatch):
+    # A block landing during one of the scroll pauses -- before there is even
+    # anything to wait for -- must stop the session right there, exactly as
+    # it does mid-wait: the scroll phase does not get a pass just because it
+    # is new.
     goto_calls = []
+    wheel_calls = []
     session = make_session(tmp_path)
-    session.page = types.SimpleNamespace(goto=lambda *a, **kw: goto_calls.append(1))
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: goto_calls.append(1),
+        mouse=types.SimpleNamespace(wheel=lambda *a, **kw: wheel_calls.append(1)),
+    )
 
     sleeps = []
 
@@ -483,4 +517,118 @@ def test_visit_profile_surfaces_a_block_that_arrives_during_the_wait(tmp_path, m
         session.visit_profile("alice")
 
     assert goto_calls == [1]  # a single navigation -- visit_profile never retries
-    assert len(sleeps) == 1   # the wait aborted immediately once the block landed
+    assert len(sleeps) == 1   # scrolling aborted after its very first pause
+    assert wheel_calls == [1]  # never reached a second movement, let alone the wait
+
+
+def test_visit_profile_surfaces_a_block_that_arrives_during_the_wait_after_scrolling(tmp_path, monkeypatch):
+    # The companion case: scrolling itself finishes clean, and the block only
+    # lands afterwards, during the bounded wait_for_condition poll -- the
+    # pre-existing guarantee this change must not weaken.
+    session = make_session(tmp_path)
+    session.page = fake_page(goto=lambda *a, **kw: None)
+    _fix_scroll_count(monkeypatch, 2)
+
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) == 3:  # after both scroll pauses, on the wait's first poll
+            session._on_response(FakeResponse(429, "https://www.instagram.com/api/v1/x"))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    with pytest.raises(BlockedError, match="429"):
+        session.visit_profile("alice")
+
+    assert len(sleeps) == 3  # the wait aborted immediately once the block landed
+
+
+# --- Session._scroll_profile_grid: the trigger for a request the page did --
+# --- not always issue on its own --------------------------------------------
+#
+# Confirmed by hand in a VNC session: a direct navigation to a profile often
+# renders the first grid page from server-side data without ever firing the
+# GraphQL request this project intercepts, while scrolling makes the grid
+# extend after a 1-2s load -- that pause being the request firing. These
+# tests pin the shape of the fix (a few modest, checked movements) directly,
+# separately from visit_profile's own composition of scroll-then-wait above.
+
+def test_scroll_profile_grid_moves_the_wheel_a_few_times_with_short_pauses(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    wheel_calls = []
+    session.page = types.SimpleNamespace(
+        mouse=types.SimpleNamespace(wheel=lambda dx, dy: wheel_calls.append((dx, dy)))
+    )
+    pauses = []
+    monkeypatch.setattr(session, "_pause", lambda low, high: pauses.append((low, high)))
+    # Distinguish the loop-count call (2, 3) from the per-movement distance
+    # call (300, 600) so each can be pinned to its own value.
+    monkeypatch.setattr(random, "randint",
+                         lambda a, b: 3 if (a, b) == (2, 3) else 450)
+
+    session._scroll_profile_grid()
+
+    assert wheel_calls == [(0, 450)] * 3
+    # Short and irregular, in the spirit of warm_up's pacing -- but smaller:
+    # warm_up's 2-6s is camouflage on a page nothing is extracted from, this
+    # is a nudge to trigger one lazy-loaded request, not a lingering visit.
+    assert pauses == [(0.5, 1.5)] * 3
+
+
+def test_scroll_profile_grid_stops_immediately_once_a_block_lands_mid_scroll(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    wheel_calls = []
+    session.page = types.SimpleNamespace(
+        mouse=types.SimpleNamespace(wheel=lambda *a, **kw: wheel_calls.append(1))
+    )
+    monkeypatch.setattr(random, "randint",
+                         lambda a, b: 3 if (a, b) == (2, 3) else 450)
+
+    def blocking_pause(low, high):
+        session._on_response(FakeResponse(429, "https://www.instagram.com/api/v1/x"))
+
+    monkeypatch.setattr(session, "_pause", blocking_pause)
+
+    with pytest.raises(BlockedError, match="429"):
+        session._scroll_profile_grid()
+
+    # Stopped after the first movement's pause -- never reached a 2nd or 3rd,
+    # even though 3 were planned.
+    assert wheel_calls == [1]
+
+
+def test_visit_profile_block_from_the_navigation_itself_stops_before_any_scroll(tmp_path):
+    # A block found on the navigation response itself (a redirect to
+    # /accounts/login, a 401 riding alongside it) must stop the visit before
+    # a single wheel event fires on a page that was already refused.
+    session = make_session(tmp_path)
+    wheel_calls = []
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(
+            FakeResponse(429, "https://www.instagram.com/api/v1/x")
+        ),
+        mouse=types.SimpleNamespace(wheel=lambda *a, **kw: wheel_calls.append(1)),
+    )
+
+    with pytest.raises(BlockedError, match="429"):
+        session.visit_profile("alice")
+
+    assert wheel_calls == []
+
+
+def test_visit_profile_navigates_exactly_once_even_with_scrolling(tmp_path, monkeypatch):
+    # The hard constraint scrolling must not violate: still exactly one
+    # navigation. The grid never arrives in this scenario, so this also
+    # exercises scrolling composed with a full, exhausted bounded wait.
+    session = make_session(tmp_path)
+    goto_calls = []
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: goto_calls.append(1),
+        mouse=types.SimpleNamespace(wheel=lambda *a, **kw: None),
+    )
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+    session.visit_profile("alice")
+
+    assert goto_calls == [1]
