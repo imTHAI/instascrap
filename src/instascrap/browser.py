@@ -322,9 +322,10 @@ class Session:
 
     def _scroll_profile_grid(self) -> None:
         """A few modest wheel movements with short, irregular pauses -- long
-        enough to read as a person glancing down a profile, short enough that
-        it cannot pull in a second page of the grid (see visit_profile's
-        docstring: only the first view is ever taken, on purpose).
+        enough to read as a person glancing down a profile, short enough to
+        stay a nudge rather than a browse. Movement size alone cannot promise
+        a second grid page never loads -- see the early-exit note below for
+        what actually guarantees that.
 
         Confirmed by hand against the production profile: a direct navigation
         often renders the first grid page from server-side data without ever
@@ -343,8 +344,22 @@ class Session:
         response events the same way regardless of what Python code is
         running), and a block found here must stop the session before
         another wheel event fires -- not be discovered only once scrolling
-        has already run its course."""
+        has already run its course.
+
+        Also stops the instant the grid itself shows up, for a reason that
+        has nothing to do with speed: has_profile_grid cannot tell a first
+        page of edges from a second one, so a movement made after the grid
+        is already captured risks crossing Instagram's lazy-load threshold
+        again and pulling in a page this project never asked for and does
+        not want -- silently, and non-deterministically, contradicting the
+        design's explicit "only the first view, ever" choice (see
+        visit_profile's docstring). Widening what a visit collects is a
+        decision for its own review, not a side effect of how many wheel
+        events happened to still be queued up when the first response
+        landed."""
         for _ in range(random.randint(2, 3)):
+            if any(has_profile_grid(p) for p in self._captured):
+                return
             self.page.mouse.wheel(0, random.randint(300, 600))
             self._pause(0.5, 1.5)
             self._raise_if_blocked()

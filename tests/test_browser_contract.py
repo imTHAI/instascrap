@@ -90,6 +90,23 @@ def test_block_stops_further_media_fetches(tmp_path):
         session.fetch_media("https://scontent.cdninstagram.com/v/x.jpg")
 
 
+def test_raise_if_blocked_raises_against_a_real_session(tmp_path):
+    # Against the actual Session class, not a hand-scripted stand-in: this is
+    # the exact line --login's block-safety depends on, and a mutation to a
+    # bare `pass` here must fail a test, not just the tests of a fake that
+    # scripts its own raise_if_blocked.
+    session = make_session(tmp_path)
+    session._on_response(FakeResponse(429, "https://www.instagram.com/api/v1/x"))
+    with pytest.raises(BlockedError, match="429"):
+        session.raise_if_blocked()
+
+
+def test_raise_if_blocked_is_a_no_op_when_clean(tmp_path):
+    session = make_session(tmp_path)
+    session.raise_if_blocked()  # must not raise
+    assert session._block is None
+
+
 def test_warm_up_is_the_only_thing_that_clears_a_block(tmp_path):
     session = make_session(tmp_path)
     session._on_response(FakeResponse(429, "https://www.instagram.com/api/v1/x"))
@@ -301,11 +318,12 @@ def test_visit_profile_returns_as_soon_as_the_grid_arrives(tmp_path, monkeypatch
     result = session.visit_profile("alice")
 
     assert result == [GRID_PAYLOAD]
-    # Scrolling still runs its full, fixed sequence (2 movements, pinned
-    # above) even though the grid arrived on the very first one -- it is the
-    # trigger, not a polling loop of its own -- and the bounded wait
-    # afterwards then returns on its first check, consuming no extra sleep.
-    assert len(sleeps) == 2
+    # Scrolling stops the instant the grid shows up -- a 2nd, planned
+    # movement never fires once _captured already has it, so this is a
+    # single pause total, not the full fixed sequence pinned above -- and
+    # the bounded wait afterwards then returns on its first check, consuming
+    # no extra sleep of its own.
+    assert len(sleeps) == 1
 
 
 def test_visit_profile_keeps_a_stray_payload_but_flags_the_grid_as_missing_by_giving_up(tmp_path, monkeypatch):
@@ -596,6 +614,31 @@ def test_scroll_profile_grid_stops_immediately_once_a_block_lands_mid_scroll(tmp
     # Stopped after the first movement's pause -- never reached a 2nd or 3rd,
     # even though 3 were planned.
     assert wheel_calls == [1]
+
+
+def test_scroll_profile_grid_stops_as_soon_as_the_grid_is_already_captured(tmp_path, monkeypatch):
+    # has_profile_grid cannot tell a first page of edges from a second one,
+    # so a movement made after the grid is already in _captured risks
+    # crossing Instagram's lazy-load threshold again and pulling in a page
+    # this project never asked for -- silently and non-deterministically.
+    # A planned 3rd (and 2nd) movement must never fire once the grid shows
+    # up on the 1st.
+    session = make_session(tmp_path)
+    wheel_calls = []
+    session.page = types.SimpleNamespace(
+        mouse=types.SimpleNamespace(wheel=lambda *a, **kw: wheel_calls.append(1))
+    )
+    monkeypatch.setattr(random, "randint",
+                         lambda a, b: 3 if (a, b) == (2, 3) else 450)
+
+    def pause_that_delivers_the_grid(low, high):
+        session._on_response(FakeResponse(200, API, GRID_PAYLOAD))
+
+    monkeypatch.setattr(session, "_pause", pause_that_delivers_the_grid)
+
+    session._scroll_profile_grid()
+
+    assert wheel_calls == [1]  # only the movement that triggered the grid
 
 
 def test_visit_profile_block_from_the_navigation_itself_stops_before_any_scroll(tmp_path):
