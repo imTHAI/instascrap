@@ -281,20 +281,45 @@ def _dispatch(args, cfg: Config) -> int:
 
     if args.login:
         _warn_if_blocked(store, now)
-        with Session(cfg, profile_dir, headless=False) as session:
-            # This navigation is expected to land on the login page -- that is
-            # the whole point of --login -- so it declares that intent for its
-            # own duration only. Still routed through goto(), not a raw
-            # page.goto(): this morning's regression log shows the login
-            # navigation itself timing out on its first attempt (the startup
-            # race goto()'s retry exists for), and dropping the retry to work
-            # around the block-detection bug would have traded one outage for
-            # another. See Session.expect_login_redirect's docstring for why
-            # this cannot leak into any other navigation.
-            with session.expect_login_redirect():
-                session.goto("https://www.instagram.com/accounts/login/")
-            log.info("log in manually, then press Enter here")
-            input()
+        # Mirrors --capture below: catch the one exception that matters,
+        # record it, and let it propagate to main()'s own BlockedError
+        # handler for the notification and the exit code. Needed here for a
+        # reason --capture never had to consider: --login's body no longer
+        # aborts on its own declared navigation (that was the bug fixed
+        # immediately before this), which means it can now run all the way
+        # to the operator's Enter keypress with a block sitting untouched in
+        # session._block -- stashed by a background response (a
+        # challenge_required on an XHR fired while the human is typing their
+        # password, say) that never made anything raise. Nothing else in
+        # this branch ever looks at _block again after the declared
+        # navigation ends, so raise_if_blocked() below is the only thing
+        # standing between that and a silent EXIT_OK -- the exact "insist
+        # after a refusal" pattern this whole project exists to prevent, and
+        # one the next scheduled --run would walk straight into with zero
+        # backoff.
+        try:
+            with Session(cfg, profile_dir, headless=False) as session:
+                # This navigation is expected to land on the login page -- that is
+                # the whole point of --login -- so it declares that intent for its
+                # own duration only. Still routed through goto(), not a raw
+                # page.goto(): this morning's regression log shows the login
+                # navigation itself timing out on its first attempt (the startup
+                # race goto()'s retry exists for), and dropping the retry to work
+                # around the block-detection bug would have traded one outage for
+                # another. See Session.expect_login_redirect's docstring for why
+                # this cannot leak into any other navigation.
+                with session.expect_login_redirect():
+                    session.goto("https://www.instagram.com/accounts/login/")
+                log.info("log in manually, then press Enter here")
+                input()
+                # The check this whole change is for: a block stashed at any
+                # point after the declared navigation above -- while the
+                # human was authenticating -- surfaces here, before this
+                # function ever gets to return its OK exit code.
+                session.raise_if_blocked()
+        except BlockedError as exc:
+            store.record_block(str(exc), now)
+            raise
         return EXIT_OK
 
     if args.capture:

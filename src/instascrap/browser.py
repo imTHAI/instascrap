@@ -207,6 +207,15 @@ class Session:
         if self._block is not None:
             raise self._block
 
+    def raise_if_blocked(self) -> None:
+        """Public counterpart to `_raise_if_blocked`, for the one caller
+        outside this class that needs it: `--login` in main.py, which has to
+        check for a block after the human finishes typing at a prompt this
+        class has no method of its own for. Every boundary Session already
+        knows about (navigation, media fetch, the inter-profile gap) checks
+        itself; this exists for the boundary only the caller can name."""
+        self._raise_if_blocked()
+
     def _pause(self, low: float, high: float) -> None:
         time.sleep(random.uniform(low, high))
 
