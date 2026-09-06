@@ -38,6 +38,27 @@ API_MARKERS = ("/api/v1/", "/graphql/query")
 PROFILE_GRID_WAIT_TIMEOUT_S = 30.0
 PROFILE_GRID_POLL_S = 0.25
 
+# How long warm_up waits, after its scrolling ends, for the page to go quiet
+# before handing control to the first profile visit -- see warm_up's
+# docstring for the production failure (michellemonaghan, three sessions)
+# this closes. Playwright's own networkidle wait was rejected on purpose:
+# Instagram's home feed keeps polling in the background (unread counts,
+# presence) for as long as the tab is open, so "zero in-flight requests"
+# can simply never occur and networkidle would turn this into an unbounded
+# hang -- exactly the failure mode a one-shot cron session cannot afford.
+# WARM_UP_SETTLE_QUIET_S is instead a *quiet window*: this many seconds
+# with no new response event at all, of any kind, is treated as "the home
+# feed's own traffic has caught up" without requiring it to ever fully
+# stop. WARM_UP_SETTLE_TIMEOUT_S is the backstop for when that quiet window
+# never arrives -- continuous background chatter, a slow connection -- so
+# the session still moves on rather than stalling on Instagram's own noise.
+# Both are deliberately small next to a ~10-minute session: the failure
+# this fixes was a home-feed response arriving a beat late, not minutes
+# late, so a few seconds of margin is what production evidence calls for.
+WARM_UP_SETTLE_QUIET_S = 1.5
+WARM_UP_SETTLE_TIMEOUT_S = 8.0
+WARM_UP_SETTLE_POLL_S = 0.25
+
 
 class BlockedError(RuntimeError):
     """Instagram pushed back. Never retried — the session ends here."""
@@ -141,6 +162,11 @@ class Session:
         self.headless = headless
         self._captured: list[dict] = []
         self._block: BlockedError | None = None
+        # Incremented on every response event, regardless of what it carries
+        # or whether it was ignored -- warm_up's settle wait (below) watches
+        # this to notice "the page has gone quiet" without caring which
+        # request that was, or ever inspecting _captured itself.
+        self._response_count = 0
         # Off by default and never touched by --run's path -- only
         # expect_login_redirect() below ever sets this, and only for the
         # single navigation it wraps. See that method's docstring.
@@ -175,6 +201,10 @@ class Session:
     def _on_response(self, response) -> None:
         # Playwright swallows exceptions raised inside event handlers, so a block
         # is stashed here and re-raised from visit_profile instead.
+        # Counted first, before any of the classification below -- a blocked
+        # or ignored response is still activity as far as warm_up's settle
+        # wait cares, and it must never be skipped by an early return.
+        self._response_count += 1
         payload = None
         if "application/json" in (response.headers.get("content-type") or ""):
             try:
@@ -305,9 +335,64 @@ class Session:
             raise
         self._raise_if_blocked()
 
+    def _wait_for_network_quiet(self, *, quiet_s: float, timeout_s: float, poll_s: float) -> bool:
+        """Bounded settle: wait until `quiet_s` seconds pass with no new
+        response event, capped overall at `timeout_s`. Returns whether the
+        quiet window was actually reached (False on abort or timeout).
+
+        Built on `wait_for_condition`, not a bespoke loop: that is what gets
+        the abort-checked-before-met guarantee for free, on every poll,
+        exactly like `visit_profile`'s grid wait already relies on -- a
+        block landing mid-settle must stop this immediately, the same as it
+        would mid-scroll or mid-wait.
+
+        `is_met` closes over a snapshot of `_response_count` rather than a
+        wall-clock timestamp: `wait_for_condition` already tracks elapsed
+        time as a tally of the `poll_s` increments it actually slept (see
+        its own docstring for why -- it is what lets the full-timeout path
+        run instantly under a mocked `time.sleep`), and mirroring that here
+        is what keeps this settle equally instant to unit-test rather than
+        introducing a second, real-time clock into the same wait."""
+        last_count = self._response_count
+        quiet_elapsed = 0.0
+
+        def is_met() -> bool:
+            nonlocal last_count, quiet_elapsed
+            current = self._response_count
+            if current != last_count:
+                last_count = current
+                quiet_elapsed = 0.0
+            else:
+                quiet_elapsed += poll_s
+            return quiet_elapsed >= quiet_s
+
+        return wait_for_condition(
+            is_met=is_met,
+            is_aborted=lambda: self._block is not None,
+            timeout_s=timeout_s,
+            poll_s=poll_s,
+        )
+
     def warm_up(self) -> None:
-        """Land on the home feed and scroll a little before touching any profile.
-        Costs nothing and makes the session read as a visit rather than a sweep."""
+        """Land on the home feed, scroll a little, then wait for the page to
+        go quiet before returning. Costs nothing and makes the session read
+        as a visit rather than a sweep.
+
+        The settle at the end is the fix for a real production failure:
+        michellemonaghan, always the first profile visited after warm_up,
+        came back three times with only a home-feed payload and never its
+        own grid -- reproduced nowhere else, including a --capture run on
+        the same profile with no warm_up before it. warm_up used to return
+        the instant its scrolling paused, with the home feed's own request
+        (fired by that very scrolling) possibly still in flight. The first
+        profile's navigation then started on a page still busy with that
+        request, and production evidence says the profile page did not
+        reliably issue its own grid request in that state -- the late
+        home-feed response was the only thing visit_profile's freshly
+        cleared _captured buffer ever received. See
+        _wait_for_network_quiet's docstring for the wait itself, and its
+        module-level constants above for why a bounded quiet window was
+        chosen over Playwright's own (unbounded) networkidle."""
         # The only place _block is ever cleared. A block is a property of the
         # session, not of one navigation: clearing it on entry to visit_profile
         # (as this used to) threw away a 429 that arrived while the previous
@@ -318,6 +403,19 @@ class Session:
             self._pause(2, 6)
             self.page.mouse.wheel(0, random.randint(600, 1200))
         self._pause(2, 6)
+        self._raise_if_blocked()
+        self._wait_for_network_quiet(
+            quiet_s=WARM_UP_SETTLE_QUIET_S,
+            timeout_s=WARM_UP_SETTLE_TIMEOUT_S,
+            poll_s=WARM_UP_SETTLE_POLL_S,
+        )
+        # Checked again after the settle, for the same reason goto() and
+        # visit_profile() check once more after their own waits: a block can
+        # be stashed by a response event that lands during the settle's very
+        # last poll_s sleep, after wait_for_condition's final is_aborted()
+        # check has already run and before another iteration would ever look
+        # again. Without this, such a block would sit in self._block unseen
+        # until whatever runs next happened to check for it.
         self._raise_if_blocked()
 
     def _scroll_profile_grid(self) -> None:

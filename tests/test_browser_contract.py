@@ -675,3 +675,165 @@ def test_visit_profile_navigates_exactly_once_even_with_scrolling(tmp_path, monk
     session.visit_profile("alice")
 
     assert goto_calls == [1]
+
+
+# --- Session.warm_up: settling before the first profile visit ---------------
+#
+# Regression coverage for the production defect diagnosed from the raw
+# archive: michellemonaghan, always the first profile visited after warm_up,
+# came back three times with only a stray home-feed payload and never its
+# own grid -- and succeeded the one time it was visited via --capture, which
+# calls visit_profile with no warm_up before it at all. warm_up used to
+# return the instant its scrolling paused, with the home feed's own request
+# (fired by that scrolling) possibly still in flight; the first profile then
+# navigated onto a page still busy with that traffic. These pin the settle
+# that closes the race: bounded, and still checking for a block on every
+# poll exactly like the scroll and grid waits already do.
+
+def test_warm_up_settles_the_network_before_returning(tmp_path, monkeypatch):
+    # Without the fix, warm_up returns after exactly 3 sleeps (2 scroll
+    # pauses + the trailing pause) no matter what. This pins that more
+    # sleeping happens afterwards -- the settle's own poll loop -- which is
+    # exactly what the old code never did.
+    from instascrap.browser import WARM_UP_SETTLE_QUIET_S, WARM_UP_SETTLE_POLL_S
+
+    session = make_session(tmp_path)
+    goto_calls = []
+    session.page = fake_page(goto=lambda *a, **kw: goto_calls.append(1))
+    _fix_scroll_count(monkeypatch, 2)
+
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda secs: sleeps.append(secs))
+
+    session.warm_up()
+
+    pause_sleeps = 3  # 2 scroll pauses + the trailing pause, unchanged
+    # wait_for_condition's early-exit shape (see its own tests above): the
+    # poll that finally observes the quiet window met returns without an
+    # extra trailing sleep, so this is one short of quiet_s / poll_s.
+    settle_sleeps = round(WARM_UP_SETTLE_QUIET_S / WARM_UP_SETTLE_POLL_S) - 1
+    assert len(sleeps) == pause_sleeps + settle_sleeps
+    assert goto_calls == [1]  # still exactly one navigation
+
+
+def test_warm_up_settle_gives_up_at_the_ceiling_under_continuous_activity(tmp_path, monkeypatch):
+    # The bound this satisfies: Instagram's own background polling (unread
+    # counts, presence) means a response can keep landing on every single
+    # poll, so the quiet window this simulates can never be reached. A naive
+    # full network-idle wait would hang here forever; this must still return.
+    from instascrap.browser import WARM_UP_SETTLE_TIMEOUT_S, WARM_UP_SETTLE_POLL_S
+
+    session = make_session(tmp_path)
+    goto_calls = []
+    session.page = fake_page(goto=lambda *a, **kw: goto_calls.append(1))
+    _fix_scroll_count(monkeypatch, 2)
+
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        # A benign response lands on every poll -- activity that never lets
+        # up, but never a block either.
+        session._on_response(FakeResponse(200, "https://www.instagram.com/api/v1/x", {}))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    session.warm_up()  # must return -- not hang, not raise
+
+    pause_sleeps = 3
+    settle_sleeps = round(WARM_UP_SETTLE_TIMEOUT_S / WARM_UP_SETTLE_POLL_S)
+    assert len(sleeps) == pause_sleeps + settle_sleeps
+    assert goto_calls == [1]
+
+
+def test_warm_up_raises_immediately_if_a_block_arrives_during_the_settle(tmp_path, monkeypatch):
+    # The non-negotiable rule applied to the new phase: a refusal arriving
+    # while the settle is polling must stop the session right there, not be
+    # discovered only once the quiet window or the ceiling has run its course.
+    session = make_session(tmp_path)
+    goto_calls = []
+    session.page = fake_page(goto=lambda *a, **kw: goto_calls.append(1))
+    _fix_scroll_count(monkeypatch, 2)
+
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) == 5:  # 3 pauses + 2 settle polls into the wait
+            session._on_response(FakeResponse(429, "https://www.instagram.com/api/v1/x"))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    with pytest.raises(BlockedError, match="429"):
+        session.warm_up()
+
+    # Aborted right there -- no further polling, and no second navigation.
+    assert len(sleeps) == 5
+    assert goto_calls == [1]
+
+
+def test_warm_up_block_already_stashed_before_the_settle_starts_is_not_missed(tmp_path, monkeypatch):
+    # is_aborted is checked before is_met on every poll, including the
+    # first -- a block that arrived during the trailing pause, just before
+    # the settle begins, must not be waited past.
+    session = make_session(tmp_path)
+    session.page = fake_page(goto=lambda *a, **kw: None)
+    _fix_scroll_count(monkeypatch, 2)
+
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) == 3:  # the trailing pause, the last sleep before the settle
+            session._on_response(FakeResponse(401, "https://www.instagram.com/api/v1/x"))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    with pytest.raises(BlockedError, match="401"):
+        session.warm_up()
+
+    # The settle's poll loop never ran at all: is_aborted caught it on entry.
+    assert len(sleeps) == 3
+
+
+def test_warm_up_still_navigates_exactly_once_with_the_settle_composed_in(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    goto_calls = []
+    session.page = fake_page(goto=lambda *a, **kw: goto_calls.append(1))
+    _fix_scroll_count(monkeypatch, 3)
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+    session.warm_up()
+
+    assert goto_calls == [1]
+
+
+def test_warm_up_settle_counts_any_response_not_only_api_traffic(tmp_path, monkeypatch):
+    # _response_count must be bumped by every response event, not only the
+    # API/GraphQL ones collect_payload cares about -- a static asset still
+    # in flight is still the page being busy. A mutation that moved the
+    # counter inside the JSON branch, or after collect_payload's own
+    # filtering, would make this settle instantly instead of waiting out a
+    # full quiet window.
+    from instascrap.browser import WARM_UP_SETTLE_TIMEOUT_S, WARM_UP_SETTLE_POLL_S
+
+    session = make_session(tmp_path)
+    session.page = fake_page(goto=lambda *a, **kw: None)
+    _fix_scroll_count(monkeypatch, 2)
+
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        # A plain static asset response, no JSON body, not matching any API
+        # marker -- collect_payload would return None for this, but it is
+        # still activity as far as the settle is concerned.
+        session._on_response(FakeResponse(200, "https://static.cdninstagram.com/app.js"))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    session.warm_up()
+
+    pause_sleeps = 3
+    settle_sleeps = round(WARM_UP_SETTLE_TIMEOUT_S / WARM_UP_SETTLE_POLL_S)
+    assert len(sleeps) == pause_sleeps + settle_sleeps
