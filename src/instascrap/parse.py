@@ -250,7 +250,8 @@ def extract_posts(payload: dict, account: str) -> list[Post]:
 
 
 _BLOCK_MARKERS = ("feedback_required", "challenge_required")
-_BLOCK_PATHS = ("/accounts/login", "/challenge")
+LOGIN_REDIRECT_PATH = "/accounts/login"
+_BLOCK_PATHS = (LOGIN_REDIRECT_PATH, "/challenge")
 
 
 def detect_block(status: int, payload: dict | None, url: str) -> str | None:
@@ -273,3 +274,33 @@ def detect_block(status: int, payload: dict | None, url: str) -> str | None:
                 return f"{marker} in response from {url}"
 
     return None
+
+
+def is_bare_login_redirect(status: int, payload: dict | None, url: str) -> bool:
+    """True when the only block signal `detect_block` would find in this
+    response is the plain redirect to Instagram's login page -- not a
+    status-code refusal, not a challenge-path redirect, and not a JSON marker
+    anywhere in the payload.
+
+    This exists for `--login` mode, whose whole point is a *deliberate*
+    navigation to the login page: a caller that expects to land there needs
+    to tell the difference between "arrived where I meant to go" and "was
+    redirected here mid-session", which `detect_block` cannot do -- it only
+    sees a status, a payload and a URL, never the caller's intent, and it
+    stays that way on purpose (see browser.Session.expect_login_redirect).
+
+    Deliberately as strict as detect_block is trigger-happy: this only ever
+    returns True for the single narrowest case, so every other signal --
+    including one riding on the very same response as the login redirect --
+    is still reported as a real block by the caller."""
+    if status in (401, 429):
+        return False
+    if LOGIN_REDIRECT_PATH not in url:
+        return False
+    if "/challenge" in url:
+        return False
+    if payload is not None:
+        blob = json.dumps(payload)
+        if any(marker in blob for marker in _BLOCK_MARKERS):
+            return False
+    return True

@@ -5,6 +5,7 @@ the TLS and HTTP/2 fingerprints, the JS-generated headers and the rotating
 x-ig-www-claim all come for free that way, which is exactly what a Python HTTP
 client cannot reproduce."""
 
+import contextlib
 import logging
 import random
 import time
@@ -15,7 +16,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from .config import Config
-from .parse import detect_block, has_profile_grid
+from .parse import detect_block, has_profile_grid, is_bare_login_redirect
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +141,10 @@ class Session:
         self.headless = headless
         self._captured: list[dict] = []
         self._block: BlockedError | None = None
+        # Off by default and never touched by --run's path -- only
+        # expect_login_redirect() below ever sets this, and only for the
+        # single navigation it wraps. See that method's docstring.
+        self._expect_login_redirect = False
 
     def __enter__(self) -> "Session":
         # The `with` protocol never calls __exit__ if __enter__ itself raises, so a
@@ -179,6 +184,16 @@ class Session:
         try:
             captured = collect_payload(response.status, response.url, payload)
         except BlockedError as exc:
+            # is_bare_login_redirect re-checks the same status/payload/url the
+            # exception was raised from, on purpose: the flag alone is not
+            # enough to swallow this, because a 401 or a challenge_required
+            # arriving on this very response during the declared navigation
+            # must still be a block. Only the plain, signal-free arrival at
+            # the login page is dropped.
+            if self._expect_login_redirect and is_bare_login_redirect(
+                response.status, payload, response.url
+            ):
+                return
             self._block = exc
             return
         if captured is not None:
@@ -194,6 +209,33 @@ class Session:
 
     def _pause(self, low: float, high: float) -> None:
         time.sleep(random.uniform(low, high))
+
+    @contextlib.contextmanager
+    def expect_login_redirect(self):
+        """Declares that the one navigation made inside this `with` block is
+        *meant* to land on Instagram's login page -- `--login` mode's entire
+        purpose, run by a human in a VNC session to create or refresh the
+        persistent profile. Nothing else may use this: `--run`'s path never
+        calls it, so the flag this sets defaults to (and everywhere else
+        stays) False, and a redirect to the login page mid-session is still
+        an immediate, unconditional block.
+
+        Scoped to exactly the wrapped navigation, not to the session: the
+        `finally` clears the flag whether the navigation succeeded, raised a
+        real block, or raised anything else, so suppression can never leak
+        into whatever runs after this `with` block -- in particular the
+        human typing their password afterwards, where a `challenge_required`
+        must still be caught like any other block. See
+        `parse.is_bare_login_redirect` for the narrow signal this actually
+        suppresses, and `goto`'s own final `_raise_if_blocked()` for why a
+        real block picked up during this navigation still surfaces before
+        this `with` block exits, even when it never made page.goto() itself
+        raise."""
+        self._expect_login_redirect = True
+        try:
+            yield
+        finally:
+            self._expect_login_redirect = False
 
     def goto(self, url: str, **kwargs) -> None:
         """Navigate with a bounded retry for transport-level failures only.
@@ -223,7 +265,19 @@ class Session:
         navigating again; and if the error that finally propagates out of
         retry_transient is a transient one, the block is checked once more
         before letting it through, in case it arrived during that very last
-        attempt (which never gets a next attempt to catch it at the top)."""
+        attempt (which never gets a next attempt to catch it at the top).
+
+        And a block is checked once more even when the attempt raises
+        nothing at all: a response event can stash one (a 401 riding on an
+        API call fired alongside the navigation, say) without page.goto()
+        itself ever raising, since Playwright's own load-completion wait
+        neither depends on nor is interrupted by that response. Without this
+        final check, such a block would sit in self._block undetected until
+        some later call happened to test for it — fine for warm_up, which
+        checks again after its scrolls, but --login's navigation has nothing
+        after it in that role. This is what makes expect_login_redirect's
+        suppression the only thing standing between this check and a raise:
+        it does not special-case the login path, it just always looks."""
         def attempt() -> None:
             self._raise_if_blocked()
             self.page.goto(url, **kwargs)
@@ -240,6 +294,7 @@ class Session:
         except Exception:  # noqa: BLE001 — re-raised as-is unless a block supersedes it
             self._raise_if_blocked()
             raise
+        self._raise_if_blocked()
 
     def warm_up(self) -> None:
         """Land on the home feed and scroll a little before touching any profile.

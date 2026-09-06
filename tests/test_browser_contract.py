@@ -307,6 +307,164 @@ def test_visit_profile_keeps_a_stray_payload_but_flags_the_grid_as_missing_by_gi
     assert len(sleeps) == round(PROFILE_GRID_WAIT_TIMEOUT_S / PROFILE_GRID_POLL_S)
 
 
+
+# --- Session.expect_login_redirect: the --login regression -------------------
+#
+# This morning's incident: --login's own navigation to accounts/login was
+# stashed as a block by _on_response and re-raised by Session.goto's
+# _raise_if_blocked, aborting the one mode that exists to create the
+# production session by hand. These pin exactly the boundaries the fix must
+# hold: off by default, scoped to one navigation, and narrow to the
+# login-page signal alone -- every other signal must still raise, both inside
+# the declared navigation and after it ends.
+
+def test_ordinary_navigation_redirected_to_login_is_still_an_immediate_block(tmp_path):
+    # The baseline this feature must never weaken by a millimetre: without
+    # declaring intent, a redirect to the login page is exactly the signal
+    # that flagged the owner's personal account, and stays a block.
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(
+            FakeResponse(200, "https://www.instagram.com/accounts/login/")
+        )
+    )
+    with pytest.raises(BlockedError, match="accounts/login"):
+        session.goto("https://www.instagram.com/", wait_until="domcontentloaded")
+    assert session._block is not None
+
+
+def test_visit_profile_redirected_to_login_is_still_a_block(tmp_path):
+    # Same baseline, through the actual --run entry point rather than goto()
+    # directly -- a mid-session redirect during a profile visit must still
+    # end the session immediately.
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(
+            FakeResponse(200, "https://www.instagram.com/accounts/login/")
+        )
+    )
+    with pytest.raises(BlockedError, match="accounts/login"):
+        session.visit_profile("bob")
+
+
+def test_expect_login_redirect_suppresses_the_declared_landing(tmp_path):
+    # The fix: the one navigation --login makes on purpose no longer aborts
+    # the session.
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(
+            FakeResponse(200, "https://www.instagram.com/accounts/login/")
+        )
+    )
+    with session.expect_login_redirect():
+        session.goto("https://www.instagram.com/accounts/login/")
+    assert session._block is None
+
+
+def test_a_401_during_the_declared_login_navigation_still_raises(tmp_path):
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(
+            FakeResponse(401, "https://www.instagram.com/accounts/login/")
+        )
+    )
+    with pytest.raises(BlockedError, match="401"):
+        with session.expect_login_redirect():
+            session.goto("https://www.instagram.com/accounts/login/")
+
+
+def test_challenge_required_during_the_declared_login_navigation_still_raises(tmp_path):
+    # A real challenge arriving on the network while the login page is
+    # loading -- a distinct XHR, not the top-level navigation response --
+    # must not be swallowed by the flag: is_bare_login_redirect is what
+    # keeps this narrow, not the flag alone.
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(
+            FakeResponse(400, "https://www.instagram.com/api/v1/users/web_profile_info/",
+                         {"message": "challenge_required"})
+        )
+    )
+    with pytest.raises(BlockedError, match="challenge_required"):
+        with session.expect_login_redirect():
+            session.goto("https://www.instagram.com/accounts/login/")
+
+
+def test_challenge_required_riding_on_the_login_url_itself_still_raises(tmp_path):
+    # Sharper edge case: the SAME response is both the login-page redirect
+    # and carries a challenge_required payload. detect_block's own signal
+    # priority (status, then path, then payload) reports this as "redirected
+    # to /accounts/login" rather than naming the challenge -- a pre-existing
+    # property of detect_block, not something this fix introduces -- but
+    # is_bare_login_redirect still correctly reads the payload and refuses to
+    # call this bare, so it is not suppressed: a BlockedError still ends the
+    # session, just carrying detect_block's own message for it.
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(
+            FakeResponse(200, "https://www.instagram.com/accounts/login/",
+                         {"message": "challenge_required"})
+        )
+    )
+    with pytest.raises(BlockedError):
+        with session.expect_login_redirect():
+            session.goto("https://www.instagram.com/accounts/login/")
+
+
+def test_suppression_does_not_outlive_the_navigation_it_scopes(tmp_path):
+    # Scoped to one navigation, not the session: once the wrapped goto()
+    # returns, a later redirect to the login page -- e.g. a challenge
+    # bouncing the human back there mid-login -- must be judged normally
+    # again, not swallowed by a flag left armed.
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(goto=lambda *a, **kw: None)
+
+    with session.expect_login_redirect():
+        session.goto("https://www.instagram.com/accounts/login/")
+    assert session._expect_login_redirect is False
+
+    session._on_response(FakeResponse(200, "https://www.instagram.com/accounts/login/"))
+    assert session._block is not None
+
+
+def test_expect_login_redirect_resets_even_when_the_navigation_raises(tmp_path, monkeypatch):
+    # The flag must never leak past an exception escaping the with block --
+    # a real block on a different signal here, but the same must hold for a
+    # Playwright error exhausting the retry.
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+    session = make_session(tmp_path)
+
+    def raise_401():
+        session._on_response(FakeResponse(401, "https://www.instagram.com/accounts/login/"))
+
+    session.page = types.SimpleNamespace(goto=lambda *a, **kw: raise_401())
+
+    with pytest.raises(BlockedError, match="401"):
+        with session.expect_login_redirect():
+            session.goto("https://www.instagram.com/accounts/login/")
+
+    assert session._expect_login_redirect is False
+
+
+def test_a_prior_declared_login_does_not_leak_into_a_later_ordinary_visit(tmp_path):
+    # A stateful-leak guard distinct from the scoping test above: after a
+    # legitimate expect_login_redirect() elsewhere in the same session
+    # object's life, an unrelated, later visit_profile redirected to the
+    # login page must still be an immediate block.
+    session = make_session(tmp_path)
+    session.page = types.SimpleNamespace(goto=lambda *a, **kw: None)
+    with session.expect_login_redirect():
+        session.goto("https://www.instagram.com/accounts/login/")
+
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: session._on_response(
+            FakeResponse(200, "https://www.instagram.com/accounts/login/")
+        )
+    )
+    with pytest.raises(BlockedError, match="accounts/login"):
+        session.visit_profile("bob")
+
+
 def test_visit_profile_surfaces_a_block_that_arrives_during_the_wait(tmp_path, monkeypatch):
     goto_calls = []
     session = make_session(tmp_path)
