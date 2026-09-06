@@ -38,6 +38,50 @@ API_MARKERS = ("/api/v1/", "/graphql/query")
 PROFILE_GRID_WAIT_TIMEOUT_S = 30.0
 PROFILE_GRID_POLL_S = 0.25
 
+# How many *extra* scroll-then-wait cycles visit_profile gets before it gives
+# up on a profile whose grid has not shown up after the first one. Production
+# evidence (a five-profile session, visited in the deterministic rotation
+# order §4.3 describes) put the grid request at roughly 3 fires out of 5
+# visits, with two straight-out misses that were not explained by account
+# identity or by position in the rotation -- ruling out "this account is
+# broken" and "only the profile right after warm_up is at risk" as causes.
+# What is left is the scroll gesture itself: _scroll_profile_grid's own
+# docstring already documents that a freshly-loaded profile page sometimes
+# renders its first grid page from server-side data with no lazy-load
+# request at all, and a randomized 2-3 short movements does not always cross
+# whatever threshold makes the page ask for more -- some days the feed above
+# the grid is taller (more suggested content, a pinned post), so the same
+# motion lands short. None of this is a *refusal*: nothing in
+# self._captured or self._block changes, the wait simply times out on a page
+# that never asked for anything, which is exactly what makes "scroll harder"
+# a reasonable next move for the same reason it triggered the request the
+# first time.
+#
+# 2 extra bursts -- 3 attempts total -- keeps this in the same "a few, not
+# many" register the rest of this file already uses for a bounded gesture
+# (this same constant's own 2-3 scroll movements, warm_up's 2-3 scrolls):
+# enough tries that a merely-unlucky scroll gets more than one more shot,
+# without turning a stubborn miss into an open-ended loop. Each retried
+# burst reuses PROFILE_GRID_WAIT_TIMEOUT_S rather than a shorter bound: once
+# a burst does trigger the request, it behaves like any other triggering
+# scroll (arrives within a second or two, per that constant's own docstring)
+# so the full 30s only ever gets spent again on a profile that is *still* an
+# anomaly after already being one once -- the same justification the first
+# 30s already rests on, not a new one invented for the retry. The result is
+# a deterministic worst case, worth stating outright: 3 cycles x (up to ~4.5s
+# of scrolling + 30s of waiting) is a ceiling of roughly 103s for one profile
+# that never yields a grid at all, against a typical ~10-minute session with
+# 25-90s pauses already built in between each of ~7 profiles -- noticeable,
+# but not what turns a session unpredictable, and still ends in
+# grid_missing exactly as before: the extra bursts change how many chances
+# the request gets, never what happens when it never comes.
+#
+# Explicitly not pagination: every burst re-scrolls the *same* first grid
+# page and stops the instant has_profile_grid sees it (see
+# _scroll_profile_grid's own early-exit for why), it never asks for a second
+# page. See design §12.1 for why that boundary is deliberate.
+PROFILE_GRID_EXTRA_BURSTS = 2
+
 # How long warm_up waits, after its scrolling ends, for the page to go quiet
 # before handing control to the first profile visit -- see warm_up's
 # docstring for the production failure (michellemonaghan, three sessions)
@@ -462,6 +506,20 @@ class Session:
             self._pause(0.5, 1.5)
             self._raise_if_blocked()
 
+    def _wait_for_grid(self) -> bool:
+        """One bounded wait for the response carrying the profile grid.
+        Factored out of visit_profile so it can be called once per
+        scroll-and-wait cycle -- see PROFILE_GRID_EXTRA_BURSTS's docstring
+        for why a single cycle is not always enough. Checks the stashed
+        block on every poll via wait_for_condition's is_aborted, same as the
+        first call to this always did before it had a name of its own."""
+        return wait_for_condition(
+            is_met=lambda: any(has_profile_grid(p) for p in self._captured),
+            is_aborted=lambda: self._block is not None,
+            timeout_s=PROFILE_GRID_WAIT_TIMEOUT_S,
+            poll_s=PROFILE_GRID_POLL_S,
+        )
+
     def visit_profile(self, account: str) -> list[dict]:
         self._raise_if_blocked()
         self._captured = []
@@ -499,17 +557,24 @@ class Session:
         # can't stall the session — the caller detects that case from the
         # grid signal itself (has_profile_grid), not from the post count, so
         # it still fires even after this wait gives up.
-        #
-        # is_aborted checks the stashed block on every poll, not only once
-        # this returns: a block landing mid-wait must stop the polling
-        # immediately rather than being discovered only after 30s of waiting
-        # on a session that is already over.
-        wait_for_condition(
-            is_met=lambda: any(has_profile_grid(p) for p in self._captured),
-            is_aborted=lambda: self._block is not None,
-            timeout_s=PROFILE_GRID_WAIT_TIMEOUT_S,
-            poll_s=PROFILE_GRID_POLL_S,
-        )
+        self._wait_for_grid()
+        # A miss here is not necessarily "this profile's grid will never
+        # come" -- production evidence says it is often just this particular
+        # scroll not having crossed Instagram's lazy-load threshold (see
+        # PROFILE_GRID_EXTRA_BURSTS's docstring). So the page gets a few more
+        # chances, still with no second navigation: each iteration re-checks
+        # for a block before doing anything else (a refusal arriving between
+        # bursts must stop this before another wheel event fires, exactly
+        # like one arriving mid-burst already does via _scroll_profile_grid
+        # and _wait_for_grid's own is_aborted check), then bails out the
+        # instant the grid is already in hand rather than spending a burst it
+        # no longer needs.
+        for _ in range(PROFILE_GRID_EXTRA_BURSTS):
+            self._raise_if_blocked()
+            if any(has_profile_grid(p) for p in self._captured):
+                break
+            self._scroll_profile_grid()
+            self._wait_for_grid()
         self._raise_if_blocked()
         return list(self._captured)
 

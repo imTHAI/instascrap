@@ -7,11 +7,13 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from instascrap.browser import (
     BlockedError,
+    PROFILE_GRID_EXTRA_BURSTS,
     PROFILE_GRID_POLL_S,
     PROFILE_GRID_WAIT_TIMEOUT_S,
     collect_payload,
     wait_for_condition,
 )
+from instascrap.parse import has_profile_grid
 
 API = "https://www.instagram.com/api/v1/users/web_profile_info/?username=alice"
 
@@ -346,10 +348,148 @@ def test_visit_profile_keeps_a_stray_payload_but_flags_the_grid_as_missing_by_gi
     # visit_profile's job is only to wait long enough and hand back whatever
     # arrived.
     assert result == [HOME_FEED_PAYLOAD]
-    # 2 scroll pauses (pinned above) plus the full bounded wait, since the
-    # grid genuinely never arrives in this scenario.
-    assert len(sleeps) == 2 + round(PROFILE_GRID_WAIT_TIMEOUT_S / PROFILE_GRID_POLL_S)
+    # 2 scroll pauses (pinned above) plus the full bounded wait, repeated for
+    # the initial cycle and every PROFILE_GRID_EXTRA_BURSTS retry, since the
+    # grid genuinely never arrives in this scenario -- see the dedicated
+    # burst tests below for this same bound pinned under its own name.
+    one_cycle = 2 + round(PROFILE_GRID_WAIT_TIMEOUT_S / PROFILE_GRID_POLL_S)
+    assert len(sleeps) == one_cycle * (1 + PROFILE_GRID_EXTRA_BURSTS)
 
+
+# --- Session.visit_profile: extra scroll-and-wait bursts on the same page ----
+#
+# Regression coverage for the production measurement: a five-profile session
+# saw the grid request fire on 3 of 5 visits and simply never fire on the
+# other 2, with no correlation to account identity or position. A single
+# scroll-then-wait cycle is not enough to tell "this request will never fire"
+# apart from "this particular scroll didn't happen to trigger it" -- these
+# pin the fix, which gives the same already-loaded page more chances via
+# PROFILE_GRID_EXTRA_BURSTS before finally giving up, without ever calling
+# page.goto() a second time.
+
+def _one_cycle_sleep_count(scroll_count: int) -> int:
+    """How many time.sleep calls one full scroll-then-wait cycle burns when
+    the grid never shows up in it: one pause per scroll movement, plus the
+    full bounded wait polled to its ceiling."""
+    return scroll_count + round(PROFILE_GRID_WAIT_TIMEOUT_S / PROFILE_GRID_POLL_S)
+
+
+def test_visit_profile_captures_the_grid_when_it_only_arrives_on_a_later_burst(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    session.page = fake_page(goto=lambda *a, **kw: None)
+    _fix_scroll_count(monkeypatch, 2)
+
+    first_cycle = _one_cycle_sleep_count(2)
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) == first_cycle + 1:
+            # First scroll pause of the *second* burst -- same page, no new
+            # navigation -- finally firing the request the first burst never
+            # triggered.
+            session._on_response(FakeResponse(200, API, GRID_PAYLOAD))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    result = session.visit_profile("alice")
+
+    assert result == [GRID_PAYLOAD]
+    # Stops the instant the grid shows up, exactly like the first burst
+    # already does -- no second movement of the second burst, no wait after it.
+    assert len(sleeps) == first_cycle + 1
+
+
+def test_visit_profile_still_ends_bounded_and_reports_missing_when_grid_never_arrives(tmp_path, monkeypatch):
+    # The signal grid_missing depends on must not be weakened: a profile
+    # whose grid genuinely never fires, across every burst, still finishes in
+    # a predictable, deterministic number of polls and still hands back
+    # nothing that satisfies has_profile_grid.
+    session = make_session(tmp_path)
+    session.page = fake_page(
+        goto=lambda *a, **kw: session._on_response(FakeResponse(200, API, HOME_FEED_PAYLOAD))
+    )
+    _fix_scroll_count(monkeypatch, 2)
+
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda secs: sleeps.append(secs))
+
+    result = session.visit_profile("alice")
+
+    assert result == [HOME_FEED_PAYLOAD]  # the stray payload is still preserved
+    assert not any(has_profile_grid(p) for p in result)
+    total_cycles = 1 + PROFILE_GRID_EXTRA_BURSTS
+    assert len(sleeps) == _one_cycle_sleep_count(2) * total_cycles
+
+
+def test_visit_profile_raises_immediately_on_a_block_during_a_later_burst_scroll(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    wheel_calls = []
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: None,
+        mouse=types.SimpleNamespace(wheel=lambda *a, **kw: wheel_calls.append(1)),
+    )
+    _fix_scroll_count(monkeypatch, 2)
+
+    first_cycle = _one_cycle_sleep_count(2)
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) == first_cycle + 1:
+            # First movement's pause of the second burst.
+            session._on_response(FakeResponse(429, "https://www.instagram.com/api/v1/x"))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    with pytest.raises(BlockedError, match="429"):
+        session.visit_profile("alice")
+
+    assert len(sleeps) == first_cycle + 1
+    # 2 movements from the completed first burst + 1 movement of the second
+    # burst before it was cut off -- never reached a 2nd movement there.
+    assert len(wheel_calls) == 2 + 1
+
+
+def test_visit_profile_raises_immediately_on_a_block_during_a_later_burst_wait(tmp_path, monkeypatch):
+    session = make_session(tmp_path)
+    session.page = fake_page(goto=lambda *a, **kw: None)
+    _fix_scroll_count(monkeypatch, 2)
+
+    first_cycle = _one_cycle_sleep_count(2)
+    sleeps = []
+
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) == first_cycle + 2 + 1:
+            # Second burst's own 2 scroll pauses are done; this is its wait's
+            # first poll.
+            session._on_response(FakeResponse(401, "https://www.instagram.com/api/v1/x"))
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    with pytest.raises(BlockedError, match="401"):
+        session.visit_profile("alice")
+
+    assert len(sleeps) == first_cycle + 2 + 1
+
+
+def test_visit_profile_with_extra_bursts_still_navigates_exactly_once(tmp_path, monkeypatch):
+    # The hard constraint the whole feature must never violate, exercised
+    # here across a run that burns through every extra burst: still exactly
+    # one navigation, no matter how many scroll-and-wait cycles it takes.
+    session = make_session(tmp_path)
+    goto_calls = []
+    session.page = types.SimpleNamespace(
+        goto=lambda *a, **kw: goto_calls.append(1),
+        mouse=types.SimpleNamespace(wheel=lambda *a, **kw: None),
+    )
+    _fix_scroll_count(monkeypatch, 2)
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
+
+    session.visit_profile("alice")
+
+    assert goto_calls == [1]
 
 
 # --- Session.expect_login_redirect: the --login regression -------------------
