@@ -84,11 +84,26 @@ performed, per scope. Do them in this order; each depends on the one before it.
    `https://feeds.example.com/<préfixe>/<compte>` to News Explorer — images should
    render and a video should play in place.
 
-8. **Schedule in Unraid** (brief Step 11).
-   User Scripts → new script pointing at `deploy/run.sh` (once it's copied to
-   Unraid's script location, or referenced from `/mnt/user/appdata/instascrap-src/deploy/run.sh`),
-   cron `0 8,14,21 * * *`. Success looks like the script listed as scheduled and a
-   manual "Run script" trial completing with the same log line as step 4 above.
+8. **Schedule in Unraid** (brief Step 11) — done on 2026-09-07.
+   `deploy/user-script.sh` is installed as the User Script
+   `/boot/config/plugins/user.scripts/scripts/instascrap/script` (plus its `name`
+   and `description` siblings, all mode 700 like the neighbouring scripts). It is
+   a wrapper, not a copy: it execs
+   `/mnt/user/appdata/instascrap-src/deploy/run.sh`, so the scheduled entry point
+   and the rsync'd source stay the same file and cannot drift apart from the image.
+
+   The plugin's GUI stores a schedule in two places that must agree, and editing
+   the files by hand means writing both:
+   ```
+   /boot/config/plugins/user.scripts/schedule.json      # entry: frequency "custom", custom "0 8,14,21 * * *"
+   /boot/config/plugins/user.scripts/customSchedule.cron # 0 8,14,21 * * * .../startCustom.php <script> > /dev/null 2>&1
+   ```
+   `customSchedule.cron` is not read directly by cron — `/usr/local/sbin/update_cron`
+   concatenates every plugin's `.cron` into the system crontab, so it has to be run
+   afterwards. Success looks like `crontab -c /etc/cron.d -l | grep instascrap`
+   returning the entry, and the script showing up as scheduled in the User Scripts
+   page. run.sh's own random delay of up to 30 minutes is what keeps the three
+   fixed slots from being three fixed times.
 
 9. **Commit the real-capture test and fixture** (brief Step 12 — the part of the
    brief's single bundled commit that is still outstanding: `deploy/run.sh` and
