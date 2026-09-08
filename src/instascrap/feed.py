@@ -2,6 +2,7 @@
 incremental, so a partial write can never leave a half-correct feed behind."""
 
 import os
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Sequence
@@ -109,15 +110,101 @@ def _hardlink(source: Path, target: Path) -> None:
         target.write_bytes(source.read_bytes())
 
 
+# Served from inside the secret prefix, next to the feeds themselves: the whole
+# point is a page whose links can be handed straight to a reader, and a link is
+# only useful if it carries the prefix. Nothing here is secret that the feeds
+# beside it don't already expose.
+_INDEX_CSS = """
+:root { color-scheme: light dark; --fg: #1a1a1a; --dim: #6b6b6b; --bg: #fbfbfa;
+        --card: #fff; --line: #e6e4e0; --accent: #7a5cff; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #ececec; --dim: #9a9a9a; --bg: #191919; --card: #232323;
+          --line: #333; --accent: #a892ff; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 2.5rem 1.25rem 4rem; background: var(--bg); color: var(--fg);
+       font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+main { max-width: 46rem; margin: 0 auto; }
+h1 { font-size: 1.5rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+.sub { color: var(--dim); margin: 0 0 2rem; font-size: .9rem; }
+ul { list-style: none; margin: 0; padding: 0; }
+li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+     padding: .9rem 1.1rem; margin-bottom: .6rem; display: flex; flex-wrap: wrap;
+     align-items: baseline; gap: .5rem 1rem; }
+li.all { border-color: var(--accent); }
+.name { font-weight: 600; flex: 1 1 12rem; }
+.name a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--line); }
+.name a:hover { border-color: var(--accent); }
+.meta { color: var(--dim); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.feed { flex: 1 1 100%; }
+.feed a { color: var(--accent); text-decoration: none; font-size: .82rem;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.feed a:hover { text-decoration: underline; }
+footer { color: var(--dim); font-size: .8rem; margin-top: 2rem; }
+"""
+
+
+def build_index(summaries: Sequence[tuple[str, int, datetime | None]], cfg: Config,
+                generated_at: datetime) -> str:
+    """The recap page: one row per account, plus the combined feed.
+
+    `summaries` is (account, item count, most recent post) as publish() already
+    has it in hand — recomputed here it would mean a second pass over the whole
+    archive for nothing. An account with no posts yet still gets a row: a newly
+    added account that never fills is exactly what this page should make
+    obvious, and omitting it would hide it."""
+    rows = []
+    for account, count, latest in summaries:
+        name = escape(account)
+        url = escape(_public_url(cfg, f"{account}.xml"), quote=True)
+        if latest:
+            plural = "s" if count > 1 else ""
+            meta = f"{count} post{plural} · dernier le {latest.strftime('%d/%m/%Y')}"
+        else:
+            meta = "aucun post pour l'instant"
+        rows.append(
+            f'<li><span class="name"><a href="https://www.instagram.com/{name}/">@{name}</a></span>'
+            f'<span class="meta">{meta}</span>'
+            f'<span class="feed"><a href="{url}">{url}</a></span></li>'
+        )
+
+    all_url = escape(_public_url(cfg, "all.xml"), quote=True)
+    total = sum(count for _, count, _ in summaries)
+    rows.insert(0,
+        f'<li class="all"><span class="name">Tous les comptes</span>'
+        f'<span class="meta">{min(total, cfg.feed_items)} post(s) les plus récents</span>'
+        f'<span class="feed"><a href="{all_url}">{all_url}</a></span></li>')
+
+    return (
+        "<!doctype html>\n<html lang=\"fr\">\n<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        # Belt and braces alongside Caddy: the prefix is the only thing keeping
+        # these URLs private, and a page that gets indexed hands it away.
+        '<meta name="robots" content="noindex, nofollow">\n'
+        "<title>Flux Instagram</title>\n"
+        f"<style>{_INDEX_CSS}</style>\n</head>\n<body>\n<main>\n"
+        "<h1>Flux Instagram</h1>\n"
+        '<p class="sub">Comptes suivis et flux RSS correspondants. '
+        "Colle une URL dans ton lecteur pour t'abonner.</p>\n"
+        f"<ul>\n{chr(10).join(rows)}\n</ul>\n"
+        f'<footer>Mis à jour le {generated_at.strftime("%d/%m/%Y à %H:%M")} UTC</footer>\n'
+        "</main>\n</body>\n</html>\n"
+    )
+
+
 def publish(store: Store, cfg: Config) -> list[Path]:
     out_dir = cfg.publish_dir / cfg.public_prefix
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     everything: list[Post] = []
 
+    summaries: list[tuple[str, int, datetime | None]] = []
+
     for account in cfg.accounts:
         posts = store.load_posts(account, limit=cfg.feed_items)
         everything.extend(posts)
+        summaries.append((account, len(posts), posts[0].timestamp_utc if posts else None))
 
         path = out_dir / f"{account}.xml"
         _write_text_atomic(path, build_feed(account, posts, cfg))
@@ -138,4 +225,8 @@ def publish(store: Store, cfg: Config) -> list[Path]:
         description="Tous les comptes suivis, réhébergés",
     ))
     written.append(all_path)
+
+    index_path = out_dir / "index.html"
+    _write_text_atomic(index_path, build_index(summaries, cfg, datetime.now(timezone.utc)))
+    written.append(index_path)
     return written

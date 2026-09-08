@@ -151,3 +151,44 @@ def test_publish_hardlinks_video_posters(tmp_path):
                                    "https://cdn.test/v.jpg": b"jpeg"})
     publish(store, cfg)
     assert (cfg.publish_dir / cfg.public_prefix / "media/alice/VID/0_poster.jpg").read_bytes() == b"jpeg"
+
+
+# --- the recap page published beside the feeds ---------------------------------
+
+def index_of(tmp_path, *, accounts, posts_by_account, feed_items=50):
+    cfg = cfg_for(tmp_path, feed_items=feed_items)
+    cfg = Config(accounts=accounts, data_dir=cfg.data_dir, publish_dir=cfg.publish_dir,
+                 public_base_url=cfg.public_base_url, public_prefix=cfg.public_prefix,
+                 accounts_per_session=cfg.accounts_per_session, feed_items=cfg.feed_items,
+                 min_gap_seconds=cfg.min_gap_seconds, max_gap_seconds=cfg.max_gap_seconds)
+    store = Store(cfg.data_dir)
+    for account, posts in posts_by_account.items():
+        for p in posts:
+            store.save_post(p, {m.url: b"bytes" for m in p.media})
+    publish(store, cfg)
+    return (cfg.publish_dir / cfg.public_prefix / "index.html").read_text()
+
+
+def test_index_lists_every_account_with_its_feed_url(tmp_path):
+    html = index_of(tmp_path, accounts=("alice",),
+                    posts_by_account={"alice": [post("AAA"), post("BBB")]})
+    assert "https://example.test/0123456789abcdef/alice.xml" in html
+    assert "https://example.test/0123456789abcdef/all.xml" in html
+    assert "https://www.instagram.com/alice/" in html
+    assert "2 posts" in html
+
+
+def test_index_shows_an_account_that_has_no_posts_yet(tmp_path):
+    # A freshly added account that never fills is precisely what this page is
+    # for; dropping it from the list would hide the one thing worth noticing.
+    html = index_of(tmp_path, accounts=("alice", "newcomer"),
+                    posts_by_account={"alice": [post("AAA")]})
+    assert "@newcomer" in html
+    assert "aucun post pour l'instant" in html
+
+
+def test_index_asks_not_to_be_indexed(tmp_path):
+    # The prefix is the only thing keeping these URLs private, and a page that
+    # lists all of them is the worst one to have crawled.
+    html = index_of(tmp_path, accounts=("alice",), posts_by_account={"alice": [post("AAA")]})
+    assert 'name="robots" content="noindex, nofollow"' in html
