@@ -422,6 +422,36 @@ def test_visit_profile_still_ends_bounded_and_reports_missing_when_grid_never_ar
     assert len(sleeps) == _one_cycle_sleep_count(2) * total_cycles
 
 
+def test_visit_profile_keeps_waiting_when_the_grid_that_lands_is_another_accounts(tmp_path, monkeypatch):
+    # The wrong-account defect, at the boundary where it starts: a grid
+    # response belonging to the profile visited *before* this one lands here,
+    # late. Structurally it is a profile grid like any other, so the old check
+    # accepted it and this visit stopped waiting for its own -- which is why
+    # the late account's posts were harvested under its successor's name and
+    # the successor's own grid was never waited for. The wait must run to the
+    # end of its bursts instead, and grid_missing must still fire.
+    bobs_grid = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [
+        {"node": {"code": "BOB1", "taken_at": 1756729800, "media_type": 1,
+                  "user": {"username": "bob"}}}
+    ]}}}
+    session = make_session(tmp_path)
+    session.page = fake_page(
+        goto=lambda *a, **kw: session._on_response(FakeResponse(200, API, bobs_grid))
+    )
+    _fix_scroll_count(monkeypatch, 2)
+
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", lambda secs: sleeps.append(secs))
+
+    result = session.visit_profile("alice")
+
+    assert result == [bobs_grid]  # still handed back, still archived upstream
+    assert has_profile_grid(bobs_grid) is True          # structurally a grid
+    assert not any(has_profile_grid(p, "alice") for p in result)
+    total_cycles = 1 + PROFILE_GRID_EXTRA_BURSTS
+    assert len(sleeps) == _one_cycle_sleep_count(2) * total_cycles
+
+
 def test_visit_profile_raises_immediately_on_a_block_during_a_later_burst_scroll(tmp_path, monkeypatch):
     session = make_session(tmp_path)
     wheel_calls = []
@@ -725,7 +755,7 @@ def test_scroll_profile_grid_moves_the_wheel_a_few_times_with_short_pauses(tmp_p
     monkeypatch.setattr(random, "randint",
                          lambda a, b: 3 if (a, b) == (2, 3) else 450)
 
-    session._scroll_profile_grid()
+    session._scroll_profile_grid("alice")
 
     assert wheel_calls == [(0, 450)] * 3
     # Short and irregular, in the spirit of warm_up's pacing -- but smaller:
@@ -749,7 +779,7 @@ def test_scroll_profile_grid_stops_immediately_once_a_block_lands_mid_scroll(tmp
     monkeypatch.setattr(session, "_pause", blocking_pause)
 
     with pytest.raises(BlockedError, match="429"):
-        session._scroll_profile_grid()
+        session._scroll_profile_grid("alice")
 
     # Stopped after the first movement's pause -- never reached a 2nd or 3rd,
     # even though 3 were planned.
@@ -776,7 +806,7 @@ def test_scroll_profile_grid_stops_as_soon_as_the_grid_is_already_captured(tmp_p
 
     monkeypatch.setattr(session, "_pause", pause_that_delivers_the_grid)
 
-    session._scroll_profile_grid()
+    session._scroll_profile_grid("alice")
 
     assert wheel_calls == [1]  # only the movement that triggered the grid
 

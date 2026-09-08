@@ -462,7 +462,7 @@ class Session:
         # until whatever runs next happened to check for it.
         self._raise_if_blocked()
 
-    def _scroll_profile_grid(self) -> None:
+    def _scroll_profile_grid(self, account: str) -> None:
         """A few modest wheel movements with short, irregular pauses -- long
         enough to read as a person glancing down a profile, short enough to
         stay a nudge rather than a browse. Movement size alone cannot promise
@@ -500,13 +500,13 @@ class Session:
         events happened to still be queued up when the first response
         landed."""
         for _ in range(random.randint(2, 3)):
-            if any(has_profile_grid(p) for p in self._captured):
+            if any(has_profile_grid(p, account) for p in self._captured):
                 return
             self.page.mouse.wheel(0, random.randint(300, 600))
             self._pause(0.5, 1.5)
             self._raise_if_blocked()
 
-    def _wait_for_grid(self) -> bool:
+    def _wait_for_grid(self, account: str) -> bool:
         """One bounded wait for the response carrying the profile grid.
         Factored out of visit_profile so it can be called once per
         scroll-and-wait cycle -- see PROFILE_GRID_EXTRA_BURSTS's docstring
@@ -514,7 +514,7 @@ class Session:
         block on every poll via wait_for_condition's is_aborted, same as the
         first call to this always did before it had a name of its own."""
         return wait_for_condition(
-            is_met=lambda: any(has_profile_grid(p) for p in self._captured),
+            is_met=lambda: any(has_profile_grid(p, account) for p in self._captured),
             is_aborted=lambda: self._block is not None,
             timeout_s=PROFILE_GRID_WAIT_TIMEOUT_S,
             poll_s=PROFILE_GRID_POLL_S,
@@ -545,7 +545,7 @@ class Session:
         # interception, a reshaped page, a request that fires but is slow --
         # and folding it into the scroll loop would blur the one signal
         # (has_profile_grid never arriving) that grid_missing depends on.
-        self._scroll_profile_grid()
+        self._scroll_profile_grid(account)
         # Wait for the response that actually carries the grid, not a flat
         # delay: a flat 1.5-3.5s sleep is what let michellemonaghan's session
         # come back empty in production — the grid response hadn't arrived in
@@ -557,7 +557,7 @@ class Session:
         # can't stall the session — the caller detects that case from the
         # grid signal itself (has_profile_grid), not from the post count, so
         # it still fires even after this wait gives up.
-        self._wait_for_grid()
+        self._wait_for_grid(account)
         # A miss here is not necessarily "this profile's grid will never
         # come" -- production evidence says it is often just this particular
         # scroll not having crossed Instagram's lazy-load threshold (see
@@ -571,10 +571,10 @@ class Session:
         # no longer needs.
         for _ in range(PROFILE_GRID_EXTRA_BURSTS):
             self._raise_if_blocked()
-            if any(has_profile_grid(p) for p in self._captured):
+            if any(has_profile_grid(p, account) for p in self._captured):
                 break
-            self._scroll_profile_grid()
-            self._wait_for_grid()
+            self._scroll_profile_grid(account)
+            self._wait_for_grid(account)
         self._raise_if_blocked()
         return list(self._captured)
 

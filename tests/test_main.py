@@ -276,6 +276,31 @@ def test_a_quiet_profile_with_no_new_posts_is_not_flagged_as_grid_missing(tmp_pa
     assert result.grid_missing == []
 
 
+def test_another_accounts_grid_arriving_mid_visit_is_not_harvested(tmp_path):
+    # Production, first three days: a grid response is slow, the visit it
+    # belongs to gives up, and it lands during the *next* profile's visit. The
+    # payload is a perfectly well-formed profile grid, so nothing about its
+    # shape says it is the wrong one -- only its authors do. 48 of the first 75
+    # archived posts were filed under the wrong account this way, and the
+    # account whose grid it really was looked like it had received one.
+    bobs_grid = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [
+        {"node": {"code": "BOB1", "taken_at": 1756729800, "media_type": 1,
+                  "caption": None, "like_count": 1, "comment_count": 0,
+                  "user": {"username": "bob"},
+                  "image_versions2": {"candidates": [
+                      {"url": "https://cdn.test/BOB1.jpg", "width": 100, "height": 100}]}}}]}}}
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    store = Store(cfg.data_dir)
+    result = run_session(cfg, store, FakeSession(payloads=[bobs_grid]), NOW)
+
+    assert result.new_posts == 0
+    assert result.dropped_nodes == 0     # a foreign grid, not a malformed node
+    assert result.grid_missing == ["alice"]  # alice still never got hers
+    assert not (cfg.data_dir / "posts" / "alice").exists()
+    # Still archived: the raw capture is what made this diagnosable at all.
+    assert list((cfg.data_dir / "raw" / "alice").glob("*.json.gz"))
+
+
 def test_dropped_nodes_are_counted(tmp_path):
     cfg = cfg_for(tmp_path, accounts=("alice",))
     junk = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [

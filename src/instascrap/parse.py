@@ -10,6 +10,7 @@ container key) has been dropped entirely rather than kept as a dead fallback.
 """
 
 import json
+from collections import Counter
 from datetime import datetime, timezone
 
 from .models import Media, Post
@@ -188,31 +189,90 @@ def _walk_edges(obj) -> list[dict]:
     return found
 
 
-def has_profile_grid(payload) -> bool:
-    """True if `payload` carries a profile-grid container at any depth.
+def grid_owner(payload) -> str | None:
+    """Whose profile grid `payload` carries, casefolded -- or None when it
+    carries no grid, or carries one whose nodes name no author.
 
-    A structural check only -- it doesn't care whether the edges inside are
-    well-formed, just whether the container is present at all. That's what
-    browser.py needs: a way to tell "the response a profile visit is waiting
-    for has arrived" from "something else arrived" (typically a home-feed
-    payload left over from warm_up), without duplicating the container name
-    Instagram uses. extract_posts_counted stays the parser of record for
-    whether what's inside is actually usable.
+    Decided by a majority vote over the nodes' own authors rather than by any
+    single node, because Instagram puts the *co-author* in a node's `user` on
+    a collab post: a grid legitimately holds a minority of nodes authored by
+    somebody else (seen on alanritchson's real grid, where a
+    reacherprimevideo collab sits among his own posts). The profile owner is
+    the author of the overwhelming majority, so the mode is the reliable
+    reading, and testing ownership node by node would throw away real posts.
 
-    Known, accepted boundary: checks only that the container *key* is
-    present, not that its value is a usable dict -- a nulled-out container
-    would read as "grid received" indistinguishably from a genuinely empty
-    one. Not seen in a real capture and not worth tightening speculatively."""
+    A tie reads as None rather than picking a side. None means "cannot tell"
+    everywhere it is used, and the callers below treat that as permission,
+    not refusal -- an account with two posts, one of them a collab, must not
+    lose its grid to a coin flip.
+    """
+    authors: Counter[str] = Counter()
+    for edge in _walk_edges(payload):
+        node = edge.get("node") if isinstance(edge, dict) else None
+        if not isinstance(node, dict):
+            continue
+        user = node.get("user")
+        if not isinstance(user, dict):
+            continue
+        username = user.get("username")
+        if isinstance(username, str) and username:
+            authors[username.casefold()] += 1
+    if not authors:
+        return None
+    ranked = authors.most_common(2)
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return None
+    return ranked[0][0]
+
+
+def _has_grid_container(payload) -> bool:
     if isinstance(payload, dict):
         for key, value in payload.items():
             if key in PROFILE_GRID_CONTAINERS:
                 return True
-            if has_profile_grid(value):
+            if _has_grid_container(value):
                 return True
         return False
     if isinstance(payload, list):
-        return any(has_profile_grid(item) for item in payload)
+        return any(_has_grid_container(item) for item in payload)
     return False
+
+
+def has_profile_grid(payload, account: str | None = None) -> bool:
+    """True if `payload` carries a profile-grid container at any depth -- and,
+    when `account` is given, one that belongs to that account.
+
+    Without `account` this is a structural check only: it doesn't care whether
+    the edges inside are well-formed, just whether the container is present.
+    That's what tells "the response a profile visit is waiting for has arrived"
+    from "something else arrived" (typically a home-feed payload left over from
+    warm_up), without duplicating the container name Instagram uses.
+    extract_posts_counted stays the parser of record for whether what's inside
+    is actually usable.
+
+    `account` closes the hole that check alone left open. A grid response can
+    arrive during the *next* profile's visit -- 48 of the first 75 archived
+    posts landed under the wrong account that way, and worse, the foreign grid
+    satisfied the structural check, so the account that received it looked
+    like it had got its own grid and its real one was never waited for. So the
+    two failures were one: an account whose grid is late loses its posts *and*
+    poisons its successor's feed. Ownership is what tells the two payloads
+    apart, since nothing else about them differs.
+
+    An unknowable owner (grid with no authors, or a tie -- see grid_owner)
+    passes: a profile with no posts at all still receives a grid, and refusing
+    that would trade a wrong-account bug for a silently-empty-feed one.
+
+    Known, accepted boundary: checks only that the container *key* is present,
+    not that its value is a usable dict -- a nulled-out container would read as
+    "grid received" indistinguishably from a genuinely empty one. Not seen in a
+    real capture and not worth tightening speculatively."""
+    if not _has_grid_container(payload):
+        return False
+    if account is None:
+        return True
+    owner = grid_owner(payload)
+    return owner is None or owner == account.casefold()
 
 
 def extract_posts_counted(payload: dict, account: str) -> tuple[list[Post], int]:

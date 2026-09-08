@@ -14,7 +14,7 @@ from .browser import BlockedError, Session
 from .config import Config, load_config
 from .feed import publish
 from .notify import notify
-from .parse import extract_posts_counted, has_profile_grid
+from .parse import extract_posts_counted, grid_owner, has_profile_grid
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ def _fetch_post_media(session, post) -> dict[str, bytes]:
 def _visit_account(store: Store, session, account: str,
                    now: datetime, result: SessionResult) -> None:
     payloads = session.visit_profile(account)
-    if not any(has_profile_grid(p) for p in payloads):
+    if not any(has_profile_grid(p, account) for p in payloads):
         # Session.visit_profile already waits for a grid payload specifically
         # (see its docstring); getting here means that wait gave up — either
         # nothing arrived at all, or only something else did (the stray
@@ -117,14 +117,27 @@ def _visit_account(store: Store, session, account: str,
                     account, len(payloads))
         result.grid_missing.append(account)
 
-    # Archiving and parsing proceed regardless — even a stray non-grid payload
-    # is worth keeping in the raw archive, and is in fact how this defect was
-    # diagnosed in the first place. extract_posts_counted finds nothing to
-    # extract from it, which is fine: dropped_nodes is not the signal for this
-    # failure mode, grid_missing above is.
+    # Archiving proceeds regardless of what a payload turned out to be — even a
+    # stray non-grid one is worth keeping in the raw archive, and is in fact how
+    # both this account's empty visits and the wrong-account attribution below
+    # were diagnosed in the first place. Parsing is the part that discriminates.
     known = store.known_shortcodes(account)
     for payload in payloads:
         store.archive_raw(account, payload, now)
+        if not has_profile_grid(payload, account):
+            # Archived just above regardless, then skipped here. Two payloads
+            # reach this point without belonging to `account`: the harmless
+            # non-grid leftovers (a home-feed page from warm_up), which have
+            # nothing to extract anyway, and another profile's grid arriving
+            # late during this visit -- which extract_posts_counted would
+            # happily attribute to `account`, because it stamps the account it
+            # is handed onto every node it reads and has no way of knowing
+            # better. That is exactly how 48 of the first 75 archived posts
+            # ended up in the wrong feed.
+            owner = grid_owner(payload)
+            if owner is not None:
+                log.warning("%s: payload carries %s's grid, not extracted", account, owner)
+            continue
         posts, dropped = extract_posts_counted(payload, account)
         if dropped:
             log.warning("%s: %d node(s) dropped as unparseable", account, dropped)

@@ -2,7 +2,12 @@ import json
 from datetime import timezone
 from pathlib import Path
 
-from instascrap.parse import extract_posts, extract_posts_counted, has_profile_grid
+from instascrap.parse import (
+    extract_posts,
+    extract_posts_counted,
+    grid_owner,
+    has_profile_grid,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -281,3 +286,76 @@ def test_has_profile_grid_false_for_unrelated_and_garbage_payloads():
     assert has_profile_grid(load("unrelated.json")) is False
     assert has_profile_grid({"totally": ["unexpected"]}) is False
     assert has_profile_grid([1, 2, "x"]) is False
+
+
+# --- grid ownership: whose profile a grid payload actually belongs to --------
+
+def grid_of(*authors):
+    """A grid payload whose nodes are authored, in order, by `authors`."""
+    return {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [
+        {"node": image_node(code=f"POST{index}", user={"username": author})}
+        for index, author in enumerate(authors)
+    ]}}}
+
+
+def test_grid_owner_reads_the_real_capture_as_its_authors():
+    assert grid_owner(load("real_profile.json")) == "michellemonaghan"
+
+
+def test_grid_owner_is_the_majority_author_not_every_author():
+    # A collab post carries its *co-author* in `user`, so a real grid holds a
+    # minority of nodes authored by somebody else -- observed on alanritchson's
+    # grid, where a reacherprimevideo collab sits among his own posts. Owning
+    # the grid is a matter of majority, never of unanimity.
+    assert grid_owner(grid_of("alan", "reacherprimevideo", "alan", "alan")) == "alan"
+
+
+def test_grid_owner_is_none_when_it_cannot_be_told():
+    assert grid_owner(grid_of()) is None                      # no nodes at all
+    assert grid_owner(grid_of("alice", "bob")) is None        # a tie names nobody
+    assert grid_owner({"totally": ["unexpected"]}) is None     # not a grid
+    assert grid_owner(load("unrelated.json")) is None
+
+
+def test_grid_owner_ignores_nodes_that_name_no_author():
+    payload = grid_of("alice", "alice")
+    payload["data"]["xdt_api__v1__feed__user_timeline_graphql_connection"]["edges"].append(
+        {"node": image_node(code="ANON")}
+    )
+    assert grid_owner(payload) == "alice"
+
+
+def test_has_profile_grid_rejects_another_accounts_grid():
+    # The wrong-account defect: a late grid response arriving during the *next*
+    # profile's visit satisfied the container check, so it read as "this
+    # account's grid has arrived" twice over -- the account whose grid it was
+    # never waited any longer for its own, and the account it arrived under
+    # harvested it as its own posts.
+    assert has_profile_grid(load("real_profile.json"), "clairegerhardstein") is False
+
+
+def test_has_profile_grid_accepts_the_grid_of_the_account_asked_about():
+    assert has_profile_grid(load("real_profile.json"), "michellemonaghan") is True
+    assert has_profile_grid(load("real_profile.json"), "MichelleMonaghan") is True
+
+
+def test_has_profile_grid_without_an_account_checks_only_the_container():
+    assert has_profile_grid(grid_of("someone_else")) is True
+
+
+def test_has_profile_grid_accepts_a_grid_whose_owner_cannot_be_told():
+    # A profile with no posts at all still receives a grid, and its edges name
+    # nobody. Refusing that would trade the wrong-account bug for a feed that
+    # goes quietly empty -- so an unknowable owner passes.
+    assert has_profile_grid(grid_of(), "alice") is True
+    assert has_profile_grid(grid_of("alice", "bob"), "carol") is True
+
+
+def test_extraction_keeps_a_post_authored_by_a_coauthor():
+    # The counterpart to the majority rule above: ownership is decided for the
+    # payload as a whole, never node by node. A collab post really is on the
+    # grid it was found in, and dropping it would lose a real post from a real
+    # feed.
+    posts = extract_posts(grid_of("alan", "reacherprimevideo"), "alan")
+    assert [p.shortcode for p in posts] == ["POST0", "POST1"]
+    assert {p.account for p in posts} == {"alan"}
