@@ -17,12 +17,44 @@ PUBLISH=/mnt/user/appdata/caddy/site/instacrap
 REPORT="$DATA/last_run.json"
 LOCK="$DATA/session.lock"
 NOTIFY=/usr/local/emhttp/webGui/scripts/notify
+# The homelab's shared Discord helper (webhooks, embed colours), reused rather
+# than duplicated so a rotated webhook only has to change in one place.
+DISCORD_DIR=/mnt/user/homedir/scripts
+
+# Unraid's own notifications only land in a web UI nobody watches: the
+# 2026-09-26 grid breakage raised a warning on every single run and still went
+# unnoticed for a week. Discord is the channel actually read; Unraid stays as
+# the archive. A Discord failure is logged and swallowed -- it must never turn
+# a finished session into a failed one under set -e.
+notify_discord() {  # summary, description, importance
+  [ -f "$DISCORD_DIR/utils_discord.py" ] || return 0
+  local status
+  case "$3" in
+    alert) status=ERROR ;;
+    warning) status=WARNING ;;
+    *) status=INFO ;;
+  esac
+  # Subshell for the cd: utils_discord imports its sibling utils_logging by
+  # plain module name. BACKUP is the only destination with a real webhook --
+  # the others are still placeholders and would fail the POST.
+  (cd "$DISCORD_DIR" && timeout 60 uv run --quiet --no-project --with httpx python3 - "$1" "$2" "$status" <<'PY'
+import asyncio
+import sys
+
+from utils_discord import send_discord_async
+
+subject, message, status = sys.argv[1:4]
+sys.exit(0 if asyncio.run(send_discord_async(subject, message, status=status, destination="BACKUP")) else 1)
+PY
+  ) || echo "instascrap: notification Discord en échec"
+}
 
 notify_unraid() {  # summary, description, importance (normal|warning|alert)
   echo "instascrap: $1 — $2"
   if [ -x "$NOTIFY" ]; then
     "$NOTIFY" -e instascrap -s "$1" -d "$2" -i "$3" || true
   fi
+  notify_discord "$1" "$2" "$3"
 }
 
 # docker's bind mount silently creates an empty directory at the source path
@@ -107,7 +139,14 @@ case "$STATUS" in
       notify_unraid "instascrap silencieux" \
         "Aucun post nouveau depuis ${SILENT_DAYS:-?} jours, tous comptes confondus -- parser cassé ?" alert
     fi
-    if [ "${GRID_MISSING:-0}" != "0" ]; then
+    # One missing grid is routinely a slow response. Every visited profile
+    # missing it is never that: it is the capture itself that broke, and it
+    # deserves an alert on the first run, not a warning repeated for a week
+    # until the 7-day staleness backstop finally fires (2026-09-26 incident).
+    if [ "${GRID_MISSING:-0}" != "0" ] && [ "$GRID_MISSING" = "${VISITED:-}" ]; then
+      notify_unraid "instascrap capture cassée" \
+        "Aucune grille reçue sur les ${VISITED} profils visités -- interception ou format Instagram changé, pas un raté ponctuel." alert
+    elif [ "${GRID_MISSING:-0}" != "0" ]; then
       notify_unraid "instascrap grille manquante" \
         "${GRID_MISSING} profil(s) visité(s) sans grille reçue -- réponse lente, page reformée, ou interception cassée ?" warning
     fi
