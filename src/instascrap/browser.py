@@ -250,7 +250,15 @@ class Session:
         # wait cares, and it must never be skipped by an early return.
         self._response_count += 1
         payload = None
-        if "application/json" in (response.headers.get("content-type") or ""):
+        # Content-type alone is not a reliable JSON signal: since 2026-09-26
+        # Instagram serves the profile grid (PolarisProfilePostsQuery on
+        # /graphql/query) as text/javascript with a plain JSON body, and
+        # gating on application/json silently dropped every grid for a week.
+        # API URLs are therefore parsed whatever they claim to be. Everything
+        # else stays gated on application/json so block markers in stray JSON
+        # are still seen, without reading every multi-MB JS bundle.
+        content_type = response.headers.get("content-type") or ""
+        if "application/json" in content_type or any(m in response.url for m in API_MARKERS):
             try:
                 payload = response.json()
             except Exception:

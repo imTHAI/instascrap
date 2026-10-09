@@ -47,13 +47,15 @@ def test_collect_payload_detects_feedback_required():
 # testable without Playwright.
 
 class FakeResponse:
-    def __init__(self, status, url, payload=None):
+    def __init__(self, status, url, payload=None, content_type="application/json"):
         self.status = status
         self.url = url
         self._payload = payload
-        self.headers = {"content-type": "application/json"} if payload is not None else {}
+        self.headers = {"content-type": content_type} if payload is not None else {}
+        self.json_calls = 0
 
     def json(self):
+        self.json_calls += 1
         return self._payload
 
 
@@ -284,6 +286,28 @@ def test_wait_for_condition_stops_polling_the_instant_met_turns_true(monkeypatch
 
 GRID_PAYLOAD = {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": []}}}
 HOME_FEED_PAYLOAD = {"data": {"xdt_api__v1__feed__timeline__connection": {"edges": []}}}
+
+
+def test_grid_served_as_text_javascript_is_still_captured(tmp_path):
+    # Production regression from 2026-09-26: Instagram started serving
+    # PolarisProfilePostsQuery on /graphql/query as text/javascript while the
+    # body stayed plain JSON. Gating the parse on application/json dropped
+    # every grid, silently, for a week.
+    session = make_session(tmp_path)
+    session._on_response(FakeResponse(200, "https://www.instagram.com/graphql/query",
+                                      GRID_PAYLOAD, content_type="text/javascript; charset=utf-8"))
+    assert session._captured == [GRID_PAYLOAD]
+
+
+def test_non_api_javascript_body_is_never_read(tmp_path):
+    # Static bundles are text/javascript too, and some weigh megabytes; reading
+    # them on every page load just to fail json parsing is pure waste.
+    session = make_session(tmp_path)
+    bundle = FakeResponse(200, "https://static.cdninstagram.com/rsrc.php/v4/app.js",
+                          {"x": 1}, content_type="text/javascript; charset=utf-8")
+    session._on_response(bundle)
+    assert bundle.json_calls == 0
+    assert session._captured == []
 
 
 def fake_page(goto):
