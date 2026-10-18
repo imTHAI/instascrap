@@ -126,6 +126,23 @@ def test_raw_payloads_are_archived(tmp_path):
     run_session(cfg, store, FakeSession(), NOW)
     assert list((cfg.data_dir / "raw" / "alice").glob("*.json.gz"))
 
+def test_only_grid_payloads_are_archived_once_the_grid_arrived(tmp_path):
+    # Capturing every JSON response from www.instagram.com brings ~15 unrelated
+    # queries per visit (chat badges, stories, suggestions). Keeping them all
+    # would grow raw/ for nothing once the visit got what it came for.
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    noise = {"data": {"xdt_viewer": {"user": {"id": "1"}}}}
+    run_session(cfg, Store(cfg.data_dir), FakeSession(payloads=[noise, PAYLOAD, noise]), NOW)
+    assert len(list((cfg.data_dir / "raw" / "alice").glob("*.json.gz"))) == 1
+
+def test_everything_is_archived_when_the_grid_is_missing(tmp_path):
+    # A missing grid is the one case where the noise is the evidence: the
+    # 2026-10-17 breakage was diagnosed from exactly these leftovers.
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    noise = {"data": {"xdt_viewer": {"user": {"id": "1"}}}}
+    run_session(cfg, Store(cfg.data_dir), FakeSession(payloads=[noise, HOME_FEED_PAYLOAD]), NOW)
+    assert len(list((cfg.data_dir / "raw" / "alice").glob("*.json.gz"))) == 2
+
 def test_block_during_warmup_stops_before_any_profile_visit(tmp_path):
     cfg = cfg_for(tmp_path)
     store = Store(cfg.data_dir)

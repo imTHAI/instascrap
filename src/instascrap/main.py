@@ -117,15 +117,20 @@ def _visit_account(store: Store, session, account: str,
                     account, len(payloads))
         result.grid_missing.append(account)
 
-    # Archiving proceeds regardless of what a payload turned out to be — even a
-    # stray non-grid one is worth keeping in the raw archive, and is in fact how
-    # both this account's empty visits and the wrong-account attribution below
-    # were diagnosed in the first place. Parsing is the part that discriminates.
+    # When the visit got its own grid, only grid payloads (own or foreign) are
+    # archived: browser.py captures every JSON response from Instagram's host,
+    # about fifteen unrelated queries per visit, and keeping those would bloat
+    # raw/ with nothing anyone reads. When the grid is missing, everything is
+    # archived instead -- the stray leftovers are then the evidence, and are how
+    # the empty visits, the wrong-account attribution below and the 2026-10-17
+    # endpoint move were all diagnosed. Parsing is the part that discriminates.
+    archive_all = account in result.grid_missing
     known = store.known_shortcodes(account)
     for payload in payloads:
-        store.archive_raw(account, payload, now)
+        if archive_all or has_profile_grid(payload):
+            store.archive_raw(account, payload, now)
         if not has_profile_grid(payload, account):
-            # Archived just above regardless, then skipped here. Two payloads
+            # Archived just above when relevant, then skipped here. Two payloads
             # reach this point without belonging to `account`: the harmless
             # non-grid leftovers (a home-feed page from warm_up), which have
             # nothing to extract anyway, and another profile's grid arriving

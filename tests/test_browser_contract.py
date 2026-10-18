@@ -26,7 +26,15 @@ def test_collect_payload_returns_api_json():
     assert collect_payload(200, API, payload) == payload
 
 def test_collect_payload_ignores_non_api_urls():
-    assert collect_payload(200, "https://www.instagram.com/static/app.js", {"a": 1}) is None
+    assert collect_payload(200, "https://static.cdninstagram.com/btmanifest/main", {"a": 1}) is None
+
+def test_collect_payload_accepts_any_instagram_path():
+    # Instagram has moved the grid between endpoints twice (2026-09-26,
+    # 2026-10-17); the next path it picks must not need a code change.
+    assert collect_payload(200, "https://www.instagram.com/api/graphql/v9", {"a": 1}) == {"a": 1}
+
+def test_collect_payload_rejects_lookalike_hosts():
+    assert collect_payload(200, "https://www.instagram.com.evil.test/api/graphql", {"a": 1}) is None
 
 def test_collect_payload_ignores_api_url_without_json():
     assert collect_payload(200, API, None) is None
@@ -1029,8 +1037,8 @@ def test_warm_up_settle_counts_any_response_not_only_api_traffic(tmp_path, monke
 
     def fake_sleep(secs):
         sleeps.append(secs)
-        # A plain static asset response, no JSON body, not matching any API
-        # marker -- collect_payload would return None for this, but it is
+        # A plain static asset response, no JSON body, not on the API host
+        # -- collect_payload would return None for this, but it is
         # still activity as far as the settle is concerned.
         session._on_response(FakeResponse(200, "https://static.cdninstagram.com/app.js"))
 

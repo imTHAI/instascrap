@@ -10,6 +10,7 @@ import logging
 import random
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -20,12 +21,20 @@ from .parse import detect_block, has_profile_grid, is_bare_login_redirect
 
 log = logging.getLogger(__name__)
 
-# Both GraphQL paths are kept: since 2026-10-17 the profile grid
-# (PolarisProfilePostsQuery) is served on /api/graphql, while the home feed
-# (PolarisFeedTimelineRootV2Query) still goes through /graphql/query. Instagram
-# shuffles queries between the two, so dropping the old one would only move the
-# next silent breakage to whichever query migrates back.
-API_MARKERS = ("/api/v1/", "/graphql/query", "/api/graphql")
+# Matched on host, not on path. The grid has already moved endpoint once
+# (/graphql/query -> /api/graphql on 2026-10-17, with the home feed staying
+# behind), and a path allow-list turned that into three days of silently empty
+# visits. What identifies the grid is its container, which has_profile_grid
+# checks on the body; the URL only has to say "Instagram's own API traffic", and
+# every such endpoint lives on this host. Static bundles and media sit on
+# *.cdninstagram.com and stay out, which is what keeps multi-MB JS from being
+# read on every page load.
+API_HOST = "www.instagram.com"
+
+
+def is_api_url(url: str) -> bool:
+    # Exact hostname, not a substring: "www.instagram.com.evil.test" must not pass.
+    return urlsplit(url).hostname == API_HOST
 
 # How long visit_profile waits for the response carrying the profile grid,
 # instead of the flat 1.5-3.5s sleep this replaces (see visit_profile's
@@ -125,7 +134,7 @@ def collect_payload(status: int, url: str, payload: dict | None) -> dict | None:
     reason = detect_block(status, payload, url)
     if reason:
         raise BlockedError(reason)
-    if payload is None or not any(marker in url for marker in API_MARKERS):
+    if payload is None or not is_api_url(url):
         return None
     return payload
 
@@ -259,11 +268,13 @@ class Session:
         # Instagram serves the profile grid (PolarisProfilePostsQuery on
         # /graphql/query) as text/javascript with a plain JSON body, and
         # gating on application/json silently dropped every grid for a week.
-        # API URLs are therefore parsed whatever they claim to be. Everything
-        # else stays gated on application/json so block markers in stray JSON
-        # are still seen, without reading every multi-MB JS bundle.
+        # Anything on API_HOST is therefore parsed whatever it claims to be;
+        # HTML pages and "for (;;);"-prefixed bootloader responses there just
+        # fail json() and fall through as None. Everything else stays gated on
+        # application/json so block markers in stray JSON are still seen,
+        # without reading every multi-MB JS bundle.
         content_type = response.headers.get("content-type") or ""
-        if "application/json" in content_type or any(m in response.url for m in API_MARKERS):
+        if "application/json" in content_type or is_api_url(response.url):
             try:
                 payload = response.json()
             except Exception:
