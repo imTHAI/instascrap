@@ -299,6 +299,16 @@ def test_grid_served_as_text_javascript_is_still_captured(tmp_path):
     assert session._captured == [GRID_PAYLOAD]
 
 
+def test_grid_served_on_api_graphql_is_captured(tmp_path):
+    # Production regression from 2026-10-17: PolarisProfilePostsQuery moved
+    # from /graphql/query to /api/graphql, same JSON body, same container.
+    # Neither API marker matched the new path, so every grid was ignored.
+    session = make_session(tmp_path)
+    session._on_response(FakeResponse(200, "https://www.instagram.com/api/graphql",
+                                      GRID_PAYLOAD, content_type="text/javascript; charset=utf-8"))
+    assert session._captured == [GRID_PAYLOAD]
+
+
 def test_non_api_javascript_body_is_never_read(tmp_path):
     # Static bundles are text/javascript too, and some weigh megabytes; reading
     # them on every page load just to fail json parsing is pure waste.

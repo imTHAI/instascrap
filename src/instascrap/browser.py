@@ -20,7 +20,12 @@ from .parse import detect_block, has_profile_grid, is_bare_login_redirect
 
 log = logging.getLogger(__name__)
 
-API_MARKERS = ("/api/v1/", "/graphql/query")
+# Both GraphQL paths are kept: since 2026-10-17 the profile grid
+# (PolarisProfilePostsQuery) is served on /api/graphql, while the home feed
+# (PolarisFeedTimelineRootV2Query) still goes through /graphql/query. Instagram
+# shuffles queries between the two, so dropping the old one would only move the
+# next silent breakage to whichever query migrates back.
+API_MARKERS = ("/api/v1/", "/graphql/query", "/api/graphql")
 
 # How long visit_profile waits for the response carrying the profile grid,
 # instead of the flat 1.5-3.5s sleep this replaces (see visit_profile's
