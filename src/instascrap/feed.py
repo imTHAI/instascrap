@@ -24,16 +24,19 @@ def _describe(post: Post, cfg: Config) -> str:
         if media.path is None:
             continue
         url = escape(_public_url(cfg, media.path), quote=True)
-        if media.kind == "video":
-            # preload="none" matters: News Explorer would otherwise pull every
-            # video in the list view. It also means the element paints nothing at
-            # all until tapped, so the poster is what makes the entry readable.
-            poster = ""
-            if media.poster_path:
-                poster = f' poster="{escape(_public_url(cfg, media.poster_path), quote=True)}"'
-            parts.append(
-                f'<video controls preload="none"{poster} width="{media.width}" src="{url}"></video>'
-            )
+        if media.kind == "video" and media.poster_path:
+            # News Explorer drops the poster attribute on <video>: with
+            # preload="none" the article showed a blank box with a play button.
+            # A plain image linking to the file always renders, at the cost of
+            # inline playback (the click opens the mp4 in a browser).
+            poster = escape(_public_url(cfg, media.poster_path), quote=True)
+            parts.append(f'<a href="{url}"><img src="{poster}" '
+                         f'width="{media.width}" height="{media.height}"></a>')
+        elif media.kind == "video":
+            # No cover frame to show: fall back to the player. preload="none"
+            # matters, News Explorer would otherwise pull every video in the
+            # list view.
+            parts.append(f'<video controls preload="none" width="{media.width}" src="{url}"></video>')
         else:
             parts.append(f'<img src="{url}" width="{media.width}" height="{media.height}">')
     if post.caption:

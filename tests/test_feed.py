@@ -96,10 +96,13 @@ def video_post(shortcode="VID", poster="media/alice/VID/0_poster.jpg"):
     )
 
 
-def test_video_carries_a_poster(tmp_path):
-    xml = build_feed("alice", [video_post()], cfg_for(tmp_path))
-    assert "poster=" in xml
-    assert "https://example.test/0123456789abcdef/media/alice/VID/0_poster.jpg" in xml
+def test_video_with_a_poster_renders_as_a_linked_thumbnail(tmp_path):
+    description = feedparser.parse(
+        build_feed("alice", [video_post()], cfg_for(tmp_path))).entries[0].description
+    base = "https://example.test/0123456789abcdef/media/alice/VID"
+    # feedparser's sanitizer reorders attributes, so match the nesting loosely.
+    assert re.search(rf'<a href="{base}/0\.mp4"><img [^>]*src="{base}/0_poster\.jpg"', description)
+    assert "<video" not in description
 
 
 def test_video_without_a_poster_still_renders(tmp_path):
