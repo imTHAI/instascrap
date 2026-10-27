@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from instascrap import main as main_module
 from instascrap.browser import BlockedError, LoggedOutError
 from instascrap.config import Config
-from instascrap.main import run_session
+from instascrap.main import run_once, run_session
 from instascrap.store import Store
 
 NOW = datetime(2026, 9, 4, 9, 0, tzinfo=timezone.utc)
@@ -197,7 +197,6 @@ def test_main_run_does_not_open_browser_while_blocked(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "datetime", FrozenDatetime)
     monkeypatch.setattr(main_module, "Session", TrackingSession)
     monkeypatch.setattr(main_module, "publish", lambda store, cfg: [])
-    monkeypatch.setattr(main_module, "notify", lambda *a, **kw: True)
 
     exit_code = main_module.main(["--run"])
 
@@ -335,7 +334,6 @@ def test_dropped_nodes_are_counted(tmp_path):
 def patch_common(monkeypatch, session_factory):
     monkeypatch.setattr(main_module, "Session", session_factory)
     monkeypatch.setattr(main_module, "publish", lambda store, cfg: [])
-    monkeypatch.setattr(main_module, "notify", lambda *a, **kw: True)
 
 
 class ContextSession:
@@ -518,3 +516,63 @@ def test_logout_keeps_an_expired_block_for_escalation(tmp_path):
     store.record_block("HTTP 429", NOW - timedelta(hours=30))
     run_session(cfg_for(tmp_path), store, FakeSession(logout_on="alice"), NOW)
     assert store._read()["block"] is not None
+
+
+# --- alerts raised by one scheduled run ----------------------------------------
+
+class RecordingAlerter:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, level, title, message):
+        self.sent.append((level, title))
+
+
+def test_all_grids_missing_sends_capture_broken(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "publish", lambda store, cfg: [])
+    alerter = RecordingAlerter()
+    cfg = cfg_for(tmp_path)
+    run_once(cfg, Store(cfg.data_dir), alerter, NOW,
+             session_factory=ContextSession(FakeSession(empty_for=("alice", "bob"))))
+    assert ("alert", "Capture broken") in alerter.sent
+
+
+def test_some_grids_missing_is_a_warning(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "publish", lambda store, cfg: [])
+    alerter = RecordingAlerter()
+    cfg = cfg_for(tmp_path)
+    run_once(cfg, Store(cfg.data_dir), alerter, NOW,
+             session_factory=ContextSession(FakeSession(empty_for=("alice",))))
+    assert alerter.sent == [("warning", "Missing grids")]
+
+
+def test_block_alert_names_resume_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "publish", lambda store, cfg: [])
+    alerter = RecordingAlerter()
+    cfg = cfg_for(tmp_path)
+    run_once(cfg, Store(cfg.data_dir), alerter, NOW,
+             session_factory=ContextSession(FakeSession(raise_on="alice")))
+    assert alerter.sent == [("alert", "Instagram is throttling")]
+
+
+def test_quiet_successful_run_sends_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "publish", lambda store, cfg: [])
+    alerter = RecordingAlerter()
+    cfg = cfg_for(tmp_path)
+    run_once(cfg, Store(cfg.data_dir), alerter, NOW, session_factory=ContextSession(FakeSession()))
+    assert alerter.sent == []
+
+
+def test_crashed_run_alerts_and_reraises(tmp_path, monkeypatch):
+    def explode(store, cfg):
+        raise OSError("No space left on device")
+    monkeypatch.setattr(main_module, "publish", explode)
+    alerter = RecordingAlerter()
+    cfg = cfg_for(tmp_path)
+    try:
+        run_once(cfg, Store(cfg.data_dir), alerter, NOW, session_factory=ContextSession(FakeSession()))
+    except OSError:
+        pass
+    else:
+        raise AssertionError("run_once must re-raise")
+    assert alerter.sent == [("alert", "Run crashed")]

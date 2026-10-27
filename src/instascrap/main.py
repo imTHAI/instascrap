@@ -13,16 +13,14 @@ from pathlib import Path
 from .browser import BlockedError, LoggedOutError, Session
 from .config import Config, load_config
 from .feed import publish
-from .notify import notify
+from .alerts import Alerter, alert_blocked
 from .parse import extract_posts_counted, grid_owner, has_profile_grid
 from .store import Store
 
 log = logging.getLogger(__name__)
 STALE_AFTER = timedelta(days=7)
 
-# Read by deploy/run.sh, which branches on them to raise the Unraid notification.
-# The container cannot notify by itself: the Unraid notify script is PHP and lives
-# outside it, so the exit code plus last_run.json are the whole channel.
+# Exit codes of the one-shot CLI modes (--run, --login, --capture).
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_BLOCKED = 2
@@ -56,16 +54,15 @@ class SessionResult:
 
 
 def _flat(text: str, limit: int = 300) -> str:
-    """One line, no quotes, bounded. deploy/run.sh reads last_run.json with sed,
-    which has no notion of JSON escaping — an embedded quote or newline would cut
-    the field in half and turn a real error into a garbled notification."""
+    """One line, no quotes, bounded. last_run.json is read by people grepping a
+    container's data directory, and was once parsed with sed: keeping each field
+    flat keeps both working."""
     return re.sub(r'[\s"\\]+', " ", str(text)).strip()[:limit]
 
 
 def _write_last_run(data_dir: Path, **fields) -> None:
-    """The report deploy/run.sh reads back on the host. Written on every path,
-    the exception path included — a run that produces no file is itself a signal
-    the shell treats as a failure."""
+    """The outcome of the last run, for manual diagnosis. Written on every path,
+    the exception path included, so the file never describes an older run."""
     payload = {"at": datetime.now(timezone.utc).isoformat(), **fields}
     path = Path(data_dir) / LAST_RUN_NAME
     tmp = path.with_name(path.name + ".tmp")
@@ -82,7 +79,6 @@ def _write_last_run(data_dir: Path, **fields) -> None:
 def _record_block(store: Store, result: SessionResult, exc: BlockedError, now: datetime) -> SessionResult:
     result.blocked = str(exc)
     store.record_block(str(exc), now)
-    notify("instascrap bloqué", f"{exc} — pause de sécurité", level="alert")
     return result
 
 
@@ -233,13 +229,9 @@ def _silent_days(store: Store, now: datetime) -> int:
     return (now - since).days if since else 0
 
 
-def _check_staleness(store: Store, now: datetime) -> bool:
+def _is_stale(store: Store, now: datetime) -> bool:
     since = store.silence_since()
-    if since is None or now - since <= STALE_AFTER:
-        return False
-    notify("instascrap silencieux",
-           f"Aucun post nouveau depuis {(now - since).days} jours — parser cassé ?")
-    return True
+    return since is not None and now - since > STALE_AFTER
 
 
 def _warn_if_blocked(store: Store, now: datetime) -> None:
@@ -258,56 +250,92 @@ def _warn_if_blocked(store: Store, now: datetime) -> None:
                 banner, hours, until.isoformat(), banner)
 
 
-def _run(cfg: Config, store: Store, profile_dir: Path, now: datetime) -> int:
-    until = store.blocked_until()
-    if until and until > now:
-        # Chrome must not even launch during a backoff: opening a browser is
-        # itself part of what a block is meant to suppress. run_session carries
-        # the same check for callers that construct a session directly.
-        log.warning("blocked until %s, doing nothing", until)
-        _write_last_run(cfg.data_dir, mode="run", ok=True, blocked=False,
-                        reason=_flat(f"backoff actif jusqu'au {until.isoformat()}"),
-                        visited=0, new_posts=0, failures=0, grid_missing=0,
-                        dropped_nodes=0, stale=False, silent_days=_silent_days(store, now),
-                        error="")
-        return EXIT_OK
-
-    with Session(cfg, profile_dir) as session:
-        result = run_session(cfg, store, session, now)
-
-    log.info("visited=%s new_posts=%d failures=%d grid_missing=%s dropped=%d blocked=%s",
-             result.visited, result.new_posts, len(result.failures),
-             result.grid_missing, result.dropped_nodes, result.blocked)
-
-    if not result.blocked:
-        publish(store, cfg)
-    if result.grid_missing:
-        notify("instascrap grille manquante",
-               f"Grille de profil jamais reçue pour : {', '.join(result.grid_missing)} "
-               "— réponse lente, page reformée, ou interception cassée ?")
-    stale = _check_staleness(store, now)
-
-    _write_last_run(
-        cfg.data_dir,
-        mode="run",
-        ok=result.blocked is None and not result.failures,
-        blocked=result.blocked is not None,
-        reason=_flat(result.blocked or ""),
-        visited=len(result.visited),
-        accounts=_flat(",".join(result.visited)),
-        new_posts=result.new_posts,
-        failures=len(result.failures),
-        first_failure=_flat(result.failures[0] if result.failures else ""),
-        grid_missing=len(result.grid_missing),
-        dropped_nodes=result.dropped_nodes,
-        stale=stale,
-        silent_days=_silent_days(store, now),
-        error="",
-    )
-    return EXIT_BLOCKED if result.blocked else EXIT_OK
+def _alert_outcome(cfg: Config, store: Store, alerter: Alerter,
+                   result: SessionResult, now: datetime) -> None:
+    if result.blocked:
+        until = store.blocked_until()
+        if until is not None:
+            alert_blocked(alerter, result.blocked, until, cfg.tz)
+    # One missing grid is routinely a slow response. Every visited profile
+    # missing it is never that: it is the capture itself that broke, and it
+    # deserves an alert on the first run (2026-09-26 incident).
+    if result.visited and len(result.grid_missing) == len(result.visited):
+        alerter.send("alert", "Capture broken",
+                     f"None of the {len(result.visited)} visited profiles returned its grid. "
+                     "Instagram probably changed something.")
+    elif result.grid_missing:
+        alerter.send("warning", "Missing grids", f"No grid for: {', '.join(result.grid_missing)}.")
+    if result.failures:
+        alerter.send("warning", "Partial failures",
+                     f"{len(result.failures)} failure(s) on {len(result.visited)} account(s), "
+                     f"{result.new_posts} new post(s). First: {result.failures[0]}")
+    if _is_stale(store, now):
+        alerter.send("alert", "No new posts",
+                     f"Nothing new for {_silent_days(store, now)} days across all accounts. "
+                     "The parser may be broken.")
 
 
-def _dispatch(args, cfg: Config) -> int:
+def run_once(cfg: Config, store: Store, alerter: Alerter, now: datetime,
+             session_factory=None) -> SessionResult:
+    """One collection run, alerts included. Re-raises after alerting on a crash,
+    so a one-shot caller can exit non-zero and the daemon can log and carry on."""
+    # Resolved at call time, not as a default argument, so the module-level
+    # Session stays the single seam tests replace.
+    session_factory = session_factory or Session
+    try:
+        until = store.blocked_until()
+        if until and until > now:
+            # Chrome must not even launch during a backoff: opening a browser is
+            # itself part of what a block is meant to suppress. run_session carries
+            # the same check for callers that construct a session directly.
+            log.warning("blocked until %s, doing nothing", until)
+            _write_last_run(cfg.data_dir, mode="run", ok=True, blocked=False,
+                            reason=_flat(f"backoff until {until.isoformat()}"),
+                            visited=0, new_posts=0, failures=0, grid_missing=0,
+                            dropped_nodes=0, stale=False, silent_days=_silent_days(store, now),
+                            error="")
+            return SessionResult()
+
+        with session_factory(cfg, cfg.data_dir / "profile") as session:
+            result = run_session(cfg, store, session, now)
+
+        log.info("visited=%s new_posts=%d failures=%d grid_missing=%s dropped=%d blocked=%s "
+                 "logged_out=%s", result.visited, result.new_posts, len(result.failures),
+                 result.grid_missing, result.dropped_nodes, result.blocked, result.logged_out)
+
+        if not result.blocked:
+            publish(store, cfg)
+        _alert_outcome(cfg, store, alerter, result, now)
+
+        _write_last_run(
+            cfg.data_dir,
+            mode="run",
+            ok=result.blocked is None and result.logged_out is None and not result.failures,
+            blocked=result.blocked is not None,
+            reason=_flat(result.blocked or result.logged_out or ""),
+            visited=len(result.visited),
+            accounts=_flat(",".join(result.visited)),
+            new_posts=result.new_posts,
+            failures=len(result.failures),
+            first_failure=_flat(result.failures[0] if result.failures else ""),
+            grid_missing=len(result.grid_missing),
+            dropped_nodes=result.dropped_nodes,
+            stale=_is_stale(store, now),
+            silent_days=_silent_days(store, now),
+            error="",
+        )
+        return result
+    except Exception as exc:
+        log.exception("run crashed")
+        alerter.send("alert", "Run crashed", _flat(exc))
+        _write_last_run(cfg.data_dir, mode="run", ok=False, blocked=False,
+                        reason="", visited=0, new_posts=0, failures=1,
+                        grid_missing=0, dropped_nodes=0, stale=False,
+                        silent_days=0, error=_flat(exc))
+        raise
+
+
+def _dispatch(args, cfg: Config, alerter: Alerter) -> int:
     store = Store(cfg.data_dir)
     profile_dir = cfg.data_dir / "profile"
     now = datetime.now(timezone.utc)
@@ -371,7 +399,8 @@ def _dispatch(args, cfg: Config) -> int:
             raise
         return EXIT_OK
 
-    return _run(cfg, store, profile_dir, now)
+    result = run_once(cfg, store, alerter, now)
+    return EXIT_BLOCKED if result.blocked else EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -390,29 +419,33 @@ def main(argv: list[str] | None = None) -> int:
     # feedgen over arbitrary captions on every successful session and fails on a
     # full disk, which left the archive growing while the feeds silently froze.
     cfg: Config | None = None
+    alerter = Alerter(None)
     try:
         # INSTASCRAP_DATA_DIR is deliberately absent from the Unraid template: in
         # the image the volume is always /data. It exists for tests and for
         # running the code outside a container.
         cfg = load_config(os.environ, Path(os.environ.get("INSTASCRAP_DATA_DIR", "/data")))
-        return _dispatch(args, cfg)
+        alerter = Alerter(cfg.discord_webhook)
+        return _dispatch(args, cfg, alerter)
     except BlockedError as exc:
         log.error("blocked: %s", exc)
-        notify("instascrap bloqué", f"{exc} — pause de sécurité", level="alert")
         if cfg is not None:
+            until = Store(cfg.data_dir).blocked_until()
+            if until is not None:
+                alert_blocked(alerter, str(exc), until, cfg.tz)
             _write_last_run(cfg.data_dir, mode="cli", ok=False, blocked=True,
                             reason=_flat(exc), visited=0, new_posts=0, failures=0,
                             grid_missing=0, dropped_nodes=0, stale=False,
                             silent_days=0, error="")
         return EXIT_BLOCKED
-    except Exception as exc:  # noqa: BLE001 — last line of defence before cron eats it
+    except Exception as exc:  # noqa: BLE001 — last line of defence
+        # run_once has already alerted and reported its own crashes; this covers
+        # the other modes and failures before a run starts.
         log.exception("instascrap failed")
-        notify("instascrap en échec", str(exc), level="alert")
-        if cfg is not None:
+        if cfg is not None and not args.run:
+            alerter.send("alert", "Run crashed", _flat(exc))
             _write_last_run(cfg.data_dir, mode="cli", ok=False, blocked=False,
                             reason="", visited=0, new_posts=0, failures=1,
                             grid_missing=0, dropped_nodes=0, stale=False,
                             silent_days=0, error=_flat(exc))
-        # A config that will not load leaves no data_dir to write into; run.sh
-        # treats a missing report on a non-zero exit as a failure in its own right.
         return EXIT_FAILED
