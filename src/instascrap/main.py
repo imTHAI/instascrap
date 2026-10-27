@@ -13,6 +13,7 @@ from pathlib import Path
 from .browser import BlockedError, LoggedOutError, Session
 from .config import Config, load_config
 from .feed import publish
+from .login import run_login
 from .alerts import Alerter, alert_blocked
 from .parse import extract_posts_counted, grid_owner, has_profile_grid
 from .store import Store
@@ -234,22 +235,6 @@ def _is_stale(store: Store, now: datetime) -> bool:
     return since is not None and now - since > STALE_AFTER
 
 
-def _warn_if_blocked(store: Store, now: datetime) -> None:
-    """--login is reached for right after a block notification, which makes it the
-    single riskiest moment to open a browser on this account: it is the same
-    'insist after a refusal' that got the personal account flagged for good."""
-    until = store.blocked_until()
-    if not (until and until > now):
-        return
-    remaining = until - now
-    hours = remaining.days * 24 + remaining.seconds // 3600
-    banner = "!" * 72
-    log.warning("\n%s\nBLOCAGE ACTIF — encore %d h (jusqu'au %s).\n"
-                "Ouvrir un navigateur maintenant, c'est insister après un refus.\n"
-                "Attends la fin du backoff sauf si tu sais précisément pourquoi tu passes outre.\n%s",
-                banner, hours, until.isoformat(), banner)
-
-
 def _alert_outcome(cfg: Config, store: Store, alerter: Alerter,
                    result: SessionResult, now: datetime) -> None:
     if result.blocked:
@@ -345,47 +330,16 @@ def _dispatch(args, cfg: Config, alerter: Alerter) -> int:
         return EXIT_OK
 
     if args.login:
-        _warn_if_blocked(store, now)
-        # Mirrors --capture below: catch the one exception that matters,
-        # record it, and let it propagate to main()'s own BlockedError
-        # handler for the notification and the exit code. Needed here for a
-        # reason --capture never had to consider: --login's body no longer
-        # aborts on its own declared navigation (that was the bug fixed
-        # immediately before this), which means it can now run all the way
-        # to the operator's Enter keypress with a block sitting untouched in
-        # session._block -- stashed by a background response (a
-        # challenge_required on an XHR fired while the human is typing their
-        # password, say) that never made anything raise. Nothing else in
-        # this branch ever looks at _block again after the declared
-        # navigation ends, so raise_if_blocked() below is the only thing
-        # standing between that and a silent EXIT_OK -- the exact "insist
-        # after a refusal" pattern this whole project exists to prevent, and
-        # one the next scheduled --run would walk straight into with zero
-        # backoff.
-        try:
-            with Session(cfg, profile_dir, headless=False) as session:
-                # This navigation is expected to land on the login page -- that is
-                # the whole point of --login -- so it declares that intent for its
-                # own duration only. Still routed through goto(), not a raw
-                # page.goto(): this morning's regression log shows the login
-                # navigation itself timing out on its first attempt (the startup
-                # race goto()'s retry exists for), and dropping the retry to work
-                # around the block-detection bug would have traded one outage for
-                # another. See Session.expect_login_redirect's docstring for why
-                # this cannot leak into any other navigation.
-                with session.expect_login_redirect():
-                    session.goto("https://www.instagram.com/accounts/login/")
-                log.info("log in manually, then press Enter here")
-                input()
-                # The check this whole change is for: a block stashed at any
-                # point after the declared navigation above -- while the
-                # human was authenticating -- surfaces here, before this
-                # function ever gets to return its OK exit code.
-                session.raise_if_blocked()
-        except BlockedError as exc:
-            store.record_block(str(exc), now)
-            raise
-        return EXIT_OK
+        # Forced even when nothing asked for it: a manual --login is how a
+        # person refreshes a session they suspect, and run_login only opens the
+        # screen for a session marked as needing it.
+        if store.login_required() is None:
+            store.require_login("manual login", now)
+        run_login(cfg, store, alerter)
+        if store.login_required() is None:
+            return EXIT_OK
+        until = store.blocked_until()
+        return EXIT_BLOCKED if until and until > datetime.now(timezone.utc) else EXIT_FAILED
 
     if args.capture:
         try:

@@ -244,6 +244,8 @@ class Session:
         # expect_login_redirect() below ever sets this, and only for the
         # single navigation it wraps. See that method's docstring.
         self._expect_login_redirect = False
+        # Set only by login_mode(), for the whole time a human is signing in.
+        self._login_mode = False
 
     def __enter__(self) -> "Session":
         # The `with` protocol never calls __exit__ if __enter__ itself raises, so a
@@ -307,6 +309,11 @@ class Session:
                 response.status, payload, response.url
             ):
                 return
+            # A logged-out signal is the login itself while a human signs in:
+            # the 2FA and "was this you?" steps live under /accounts/login/ and
+            # /challenge/. A throttle is not a LoggedOutError and still lands.
+            if self._login_mode and isinstance(exc, LoggedOutError):
+                return
             self._block = exc
             return
         if captured is not None:
@@ -328,6 +335,29 @@ class Session:
         knows about (navigation, media fetch, the inter-profile gap) checks
         itself; this exists for the boundary only the caller can name."""
         self._raise_if_blocked()
+
+    @contextlib.contextmanager
+    def login_mode(self):
+        """For the whole time a human is signing in through the login screen.
+
+        Wider than expect_login_redirect, which covers one navigation: here the
+        page legitimately visits login and challenge pages for minutes, driven
+        by the person, not by this code. Only LoggedOutError signals are
+        dropped; 401/429 and refusal markers still stash a block, so a
+        throttle during sign-in still ends in a backoff."""
+        self._login_mode = True
+        try:
+            yield
+        finally:
+            self._login_mode = False
+
+    def cookie_names(self) -> set[str]:
+        return {cookie["name"] for cookie in self.context.cookies("https://www.instagram.com")}
+
+    def current_url(self) -> str:
+        # Read only. The login screen polls this while a person is typing; a
+        # navigation here would throw away what they typed or their 2FA step.
+        return self.page.url
 
     def _pause(self, low: float, high: float) -> None:
         time.sleep(random.uniform(low, high))

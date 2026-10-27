@@ -1066,3 +1066,43 @@ def test_collect_payload_keeps_throttle_as_plain_block():
 def test_logged_out_is_still_a_blocked_error():
     # Every existing `except BlockedError` must keep ending the session on the spot.
     assert issubclass(LoggedOutError, BlockedError)
+
+
+# --- login_mode: a human is signing in -----------------------------------------
+# While someone types their password and 2FA code, Instagram walks the page
+# through /accounts/login/... and /challenge/... on purpose. Those redirects are
+# the login itself, not a reason to abort; a real throttle still is.
+
+def test_login_mode_ignores_login_and_challenge_redirects(tmp_path):
+    session = make_session(tmp_path)
+    with session.login_mode():
+        session._on_response(FakeResponse(200, "https://www.instagram.com/accounts/login/two_factor/"))
+        session._on_response(FakeResponse(200, "https://www.instagram.com/challenge/action/"))
+    assert session._block is None
+
+
+def test_login_mode_still_catches_a_throttle(tmp_path):
+    session = make_session(tmp_path)
+    with session.login_mode():
+        session._on_response(FakeResponse(429, "https://www.instagram.com/api/v1/web/accounts/login/ajax/"))
+        session._on_response(FakeResponse(200, "https://www.instagram.com/accounts/login/"))
+    with pytest.raises(BlockedError, match="429"):
+        session.raise_if_blocked()
+
+
+def test_login_mode_is_scoped(tmp_path):
+    session = make_session(tmp_path)
+    with session.login_mode():
+        pass
+    session._on_response(FakeResponse(200, "https://www.instagram.com/accounts/login/"))
+    with pytest.raises(LoggedOutError):
+        session.raise_if_blocked()
+
+
+def test_session_reads_cookie_names_and_url_without_navigating(tmp_path):
+    session = make_session(tmp_path)
+    session.context = types.SimpleNamespace(
+        cookies=lambda url: [{"name": "sessionid"}, {"name": "csrftoken"}])
+    session.page = types.SimpleNamespace(url="https://www.instagram.com/")
+    assert session.cookie_names() == {"sessionid", "csrftoken"}
+    assert session.current_url() == "https://www.instagram.com/"

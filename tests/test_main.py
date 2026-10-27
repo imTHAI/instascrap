@@ -1,4 +1,3 @@
-import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 from instascrap import main as main_module
@@ -416,87 +415,29 @@ def test_report_is_written_even_while_blocked_by_an_active_backoff(tmp_path, mon
     assert "backoff" in read_report(tmp_path)["reason"]
 
 
-# --- --login: a block after the declared navigation must not be swallowed ----
-#
-# No test at all covered this branch before, in either direction, which is
-# part of why the gap went unnoticed: once --login's declared navigation to
-# the login page ends, nothing checked session._block again, so a real block
-# landing while the operator authenticates (a challenge_required on a
-# background XHR, say) was recorded nowhere and --login exited 0 as if the
-# login had gone cleanly. The next scheduled --run would then walk straight
-# back in with zero backoff -- the exact "insist after a refusal" pattern the
-# whole project exists to prevent. This path was dead code before the
-# login-suppression fix (--login used to abort on its own declared
-# navigation and never reached the operator prompt at all), which is why it
-# is only reachable, and only worth testing, now.
+# --- --login wiring (run_login itself is covered in test_login.py) -----------
 
-class FakeLoginSession:
-    """Stands in for browser.Session in --login tests. Supports exactly the
-    surface main.py's --login branch touches: expect_login_redirect, goto,
-    and the public raise_if_blocked the fix depends on to notice a block
-    stashed after the declared navigation ends. Session's own suppression
-    logic (is_bare_login_redirect and friends) is exercised in
-    test_browser_contract.py, not here -- this file's job is main.py's
-    wiring around whatever Session decides."""
-    def __init__(self, block_on_goto=None, block_after_input=None):
-        self.block_on_goto = block_on_goto
-        self.block_after_input = block_after_input
-        self.goto_calls = []
-
-    @contextlib.contextmanager
-    def expect_login_redirect(self):
-        yield
-
-    def goto(self, url, **kwargs):
-        self.goto_calls.append(url)
-        if self.block_on_goto:
-            raise BlockedError(self.block_on_goto)
-
-    def raise_if_blocked(self):
-        if self.block_after_input:
-            raise BlockedError(self.block_after_input)
-
-
-def _forbidden_input():
-    raise AssertionError("must not reach the operator prompt")
-
-
-def test_login_records_and_exits_blocked_when_the_declared_navigation_is_refused(tmp_path, monkeypatch):
-    # A block that IS raised, rather than merely stashed -- e.g. a 401 riding
-    # on the login page itself. Must never reach the operator prompt.
+def test_login_mode_forces_a_login_and_exits_ok_once_signed_in(tmp_path, monkeypatch):
     use_env(tmp_path, monkeypatch)
-    patch_common(monkeypatch, ContextSession(
-        FakeLoginSession(block_on_goto="HTTP 401 on accounts/login")))
-    monkeypatch.setattr("builtins.input", lambda: _forbidden_input())
+    seen = []
 
-    assert main_module.main(["--login"]) == main_module.EXIT_BLOCKED
-    assert Store(tmp_path / "data").blocked_until() is not None
+    def fake_run_login(cfg, store, alerter):
+        seen.append(store.login_required())
+        store.clear_login()
 
-
-def test_login_records_and_exits_blocked_when_a_block_lands_after_the_navigation(tmp_path, monkeypatch):
-    # The reviewer's exact scenario: the declared navigation finishes clean --
-    # goto() never raises -- and a real block only lands afterwards, stashed
-    # in session._block while the operator is typing. Before the fix nothing
-    # ever looked at _block again past this point.
-    use_env(tmp_path, monkeypatch)
-    patch_common(monkeypatch, ContextSession(FakeLoginSession(
-        block_after_input="challenge_required in response from https://www.instagram.com/api/v1/x")))
-    monkeypatch.setattr("builtins.input", lambda: "")
-
-    assert main_module.main(["--login"]) == main_module.EXIT_BLOCKED
-    assert Store(tmp_path / "data").blocked_until() is not None
-
-
-def test_login_exits_clean_when_no_block_ever_lands(tmp_path, monkeypatch):
-    # The pin against a false alarm: an ordinary, successful login must still
-    # exit 0 with no block recorded -- the fix must not turn every clean
-    # --login into a false positive.
-    use_env(tmp_path, monkeypatch)
-    patch_common(monkeypatch, ContextSession(FakeLoginSession()))
-    monkeypatch.setattr("builtins.input", lambda: "")
-
+    monkeypatch.setattr(main_module, "run_login", fake_run_login)
     assert main_module.main(["--login"]) == main_module.EXIT_OK
-    assert Store(tmp_path / "data").blocked_until() is None
+    assert seen == ["manual login"]
+
+
+def test_login_mode_exits_blocked_when_sign_in_was_throttled(tmp_path, monkeypatch):
+    use_env(tmp_path, monkeypatch)
+
+    def fake_run_login(cfg, store, alerter):
+        store.record_block("HTTP 429", datetime.now(timezone.utc))
+
+    monkeypatch.setattr(main_module, "run_login", fake_run_login)
+    assert main_module.main(["--login"]) == main_module.EXIT_BLOCKED
 
 
 # --- a logged-out session is not a block --------------------------------------
