@@ -1,69 +1,101 @@
-from pathlib import Path
+import re
+from datetime import time
+
 import pytest
-from instascrap.config import load_config
 
-BASE = """
-accounts = {accounts}
-data_dir = "/data"
-publish_dir = "/publish"
-public_base_url = "https://example.test"
-public_prefix = "{prefix}"
-accounts_per_session = 7
-feed_items = 50
-min_gap_seconds = {min_gap_seconds}
-max_gap_seconds = {max_gap_seconds}
-"""
+from instascrap.config import (ConfigError, load_config, parse_accounts, parse_schedule,
+                               resolve_feed_secret)
 
-def write_cfg(tmp_path, accounts='["alice", "bob"]', prefix="0123456789abcdef", min_gap_seconds=25, max_gap_seconds=90):
-    path = tmp_path / "config.toml"
-    path.write_text(BASE.format(accounts=accounts, prefix=prefix, min_gap_seconds=min_gap_seconds, max_gap_seconds=max_gap_seconds))
-    return path
+BASE = {"ACCOUNTS": "alice,bob", "PUBLIC_URL": "https://feeds.example.com/",
+        "VNC_PASSWORD": "secret12"}
 
-def test_load_config_reads_all_fields(tmp_path):
-    cfg = load_config(write_cfg(tmp_path))
+
+def test_minimal_env_gives_spec_defaults(tmp_path):
+    cfg = load_config(BASE, data_dir=tmp_path)
     assert cfg.accounts == ("alice", "bob")
-    assert cfg.data_dir == Path("/data")
-    assert cfg.public_prefix == "0123456789abcdef"
-    assert cfg.accounts_per_session == 7
+    assert cfg.public_base_url == "https://feeds.example.com"
+    assert cfg.data_dir == tmp_path
+    assert cfg.publish_dir == tmp_path / "public"
+    assert (cfg.accounts_per_session, cfg.feed_items) == (7, 50)
+    assert (cfg.min_gap_seconds, cfg.max_gap_seconds, cfg.jitter_minutes) == (25, 90, 30)
+    assert cfg.schedule == (time(8), time(14), time(21))
+    assert cfg.discord_webhook is None and cfg.tz == "UTC"
+    assert re.fullmatch(r"[0-9a-f]{16}", cfg.public_prefix)
 
-def test_load_config_rejects_bad_prefix(tmp_path):
-    with pytest.raises(ValueError, match="public_prefix"):
-        load_config(write_cfg(tmp_path, prefix="trop-court"))
 
-def test_load_config_rejects_empty_accounts(tmp_path):
-    with pytest.raises(ValueError, match="accounts"):
-        load_config(write_cfg(tmp_path, accounts="[]"))
+def test_accounts_are_cleaned():
+    assert parse_accounts(" @nasagoddard, map_of_europe,,nasagoddard ") == ("nasagoddard", "map_of_europe")
 
-def test_load_config_strips_trailing_slash_from_base_url(tmp_path):
-    path = tmp_path / "config.toml"
-    path.write_text(BASE.format(accounts='["a"]', prefix="0123456789abcdef", min_gap_seconds=25, max_gap_seconds=90)
-                    .replace("https://example.test", "https://example.test/"))
-    assert load_config(path).public_base_url == "https://example.test"
 
-def test_load_config_rejects_invalid_gap_order(tmp_path):
-    with pytest.raises(ValueError, match="min_gap_seconds"):
-        load_config(write_cfg(tmp_path, min_gap_seconds=100, max_gap_seconds=50))
+@pytest.mark.parametrize("raw", ["", " , ", "bad name", "..", "alice,../../etc"])
+def test_bad_accounts_are_rejected(raw):
+    with pytest.raises(ConfigError, match="ACCOUNTS"):
+        parse_accounts(raw)
 
-def test_load_config_rejects_path_traversal_in_accounts(tmp_path):
-    with pytest.raises(ValueError, match="account"):
-        load_config(write_cfg(tmp_path, accounts='["alice", "../../etc"]'))
 
-def test_load_config_rejects_dot_dot_account(tmp_path):
-    with pytest.raises(ValueError, match="account"):
-        load_config(write_cfg(tmp_path, accounts='[".."]'))
+def test_schedule_accepts_single_digit_hour():
+    assert parse_schedule("21:00, 8:00") == (time(8), time(21))
 
-def test_load_config_rejects_slash_in_account(tmp_path):
-    with pytest.raises(ValueError, match="account"):
-        load_config(write_cfg(tmp_path, accounts='["a/b"]'))
 
-def test_load_config_accepts_dots_and_underscores(tmp_path):
-    assert load_config(write_cfg(tmp_path, accounts='["a.b_c", "x9"]')).accounts == ("a.b_c", "x9")
+def test_schedule_drops_duplicates():
+    assert parse_schedule("08:00,8:00") == (time(8),)
 
-def test_load_config_reads_utf8_toml_regardless_of_locale(tmp_path):
-    # TOML is UTF-8 by definition; decoding it with the platform locale is how a
-    # container under LANG=C dies on an accented comment.
-    path = tmp_path / "config.toml"
-    body = "# préfixe généré à l'initialisation — ne pas changer\n" + BASE.format(
-        accounts='["alice"]', prefix="0123456789abcdef", min_gap_seconds=25, max_gap_seconds=90)
-    path.write_bytes(body.encode("utf-8"))
-    assert load_config(path).accounts == ("alice",)
+
+@pytest.mark.parametrize("raw", ["8h", "25:00", "08:00;14:00", "", "08:60"])
+def test_bad_schedule_is_rejected(raw):
+    with pytest.raises(ConfigError, match="SCHEDULE"):
+        parse_schedule(raw)
+
+
+@pytest.mark.parametrize("missing", ["ACCOUNTS", "PUBLIC_URL", "VNC_PASSWORD"])
+def test_required_variables(tmp_path, missing):
+    env = {k: v for k, v in BASE.items() if k != missing}
+    with pytest.raises(ConfigError, match=missing):
+        load_config(env, data_dir=tmp_path)
+
+
+@pytest.mark.parametrize("url", ["feeds.example.com", "ftp://x", "https://"])
+def test_public_url_needs_http_scheme_and_host(tmp_path, url):
+    with pytest.raises(ConfigError, match="PUBLIC_URL"):
+        load_config({**BASE, "PUBLIC_URL": url}, data_dir=tmp_path)
+
+
+def test_long_vnc_password_warns(tmp_path, caplog):
+    load_config({**BASE, "VNC_PASSWORD": "123456789"}, data_dir=tmp_path)
+    assert "only the first 8 characters" in caplog.text
+
+
+def test_feed_secret_is_generated_once_and_persisted(tmp_path):
+    first = resolve_feed_secret("", tmp_path)
+    assert re.fullmatch(r"[0-9a-f]{16}", first)
+    assert resolve_feed_secret("", tmp_path) == first
+    assert (tmp_path / "feed_secret").read_text().strip() == first
+
+
+def test_explicit_feed_secret_wins_and_is_validated(tmp_path):
+    (tmp_path / "feed_secret").write_text("aaaaaaaaaaaaaaaa")
+    assert resolve_feed_secret("3f9a1c0b7d2e4a68", tmp_path) == "3f9a1c0b7d2e4a68"
+    with pytest.raises(ConfigError, match="FEED_SECRET"):
+        resolve_feed_secret("NOTHEX", tmp_path)
+
+
+def test_gap_bounds_are_checked(tmp_path):
+    with pytest.raises(ConfigError, match="MIN_GAP_SECONDS"):
+        load_config({**BASE, "MIN_GAP_SECONDS": "100"}, data_dir=tmp_path)
+
+
+def test_non_integer_is_named(tmp_path):
+    with pytest.raises(ConfigError, match="FEED_ITEMS"):
+        load_config({**BASE, "FEED_ITEMS": "lots"}, data_dir=tmp_path)
+
+
+def test_empty_discord_webhook_means_none_and_host_is_read(tmp_path):
+    cfg = load_config({**BASE, "DISCORD_WEBHOOK": " ", "HOST_HOSTNAME": "Tower",
+                       "TZ": "Europe/Paris"}, data_dir=tmp_path)
+    assert cfg.discord_webhook is None
+    assert (cfg.host_hostname, cfg.tz) == ("Tower", "Europe/Paris")
+
+
+def test_unknown_timezone_is_named(tmp_path):
+    with pytest.raises(ConfigError, match="TZ"):
+        load_config({**BASE, "TZ": "Mars/Olympus"}, data_dir=tmp_path)

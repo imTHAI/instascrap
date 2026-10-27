@@ -359,7 +359,6 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     parser = argparse.ArgumentParser(prog="instascrap")
-    parser.add_argument("--config", type=Path, default=Path("config.toml"))
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--run", action="store_true", help="one collection session")
     mode.add_argument("--login", action="store_true", help="headed session for manual login")
@@ -373,7 +372,10 @@ def main(argv: list[str] | None = None) -> int:
     # full disk, which left the archive growing while the feeds silently froze.
     cfg: Config | None = None
     try:
-        cfg = load_config(args.config)
+        # INSTASCRAP_DATA_DIR is deliberately absent from the Unraid template: in
+        # the image the volume is always /data. It exists for tests and for
+        # running the code outside a container.
+        cfg = load_config(os.environ, Path(os.environ.get("INSTASCRAP_DATA_DIR", "/data")))
         return _dispatch(args, cfg)
     except BlockedError as exc:
         log.error("blocked: %s", exc)

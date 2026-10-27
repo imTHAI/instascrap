@@ -33,6 +33,14 @@ def cfg_for(tmp_path, accounts=("alice", "bob")):
                   public_prefix="0123456789abcdef", accounts_per_session=2,
                   feed_items=50, min_gap_seconds=0, max_gap_seconds=0)
 
+def use_env(tmp_path, monkeypatch):
+    env = {"ACCOUNTS": "alice,bob", "PUBLIC_URL": "https://example.test",
+           "VNC_PASSWORD": "testpass", "FEED_SECRET": "0123456789abcdef",
+           "ACCOUNTS_PER_SESSION": "2", "MIN_GAP_SECONDS": "0", "MAX_GAP_SECONDS": "0",
+           "INSTASCRAP_DATA_DIR": str(tmp_path / "data")}
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
 class FakeSession:
     def __init__(self, raise_on=None, warm_up_raises=False, media_fails_on=None,
                  empty_for=(), payloads=None):
@@ -168,18 +176,7 @@ def test_block_right_after_expiry_escalates_to_72h(tmp_path):
 
 def test_main_run_does_not_open_browser_while_blocked(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(f"""
-accounts = ["alice", "bob"]
-data_dir = "{data_dir}"
-publish_dir = "{tmp_path / "pub"}"
-public_base_url = "https://example.test"
-public_prefix = "0123456789abcdef"
-accounts_per_session = 2
-feed_items = 50
-min_gap_seconds = 0
-max_gap_seconds = 0
-""")
+    use_env(tmp_path, monkeypatch)
     store = Store(data_dir)
     store.record_block("HTTP 429", NOW)
 
@@ -199,7 +196,7 @@ max_gap_seconds = 0
     monkeypatch.setattr(main_module, "publish", lambda store, cfg: [])
     monkeypatch.setattr(main_module, "notify", lambda *a, **kw: True)
 
-    exit_code = main_module.main(["--run", "--config", str(config_path)])
+    exit_code = main_module.main(["--run"])
 
     assert exit_code == 0
     assert constructions == []  # Chrome must never be launched during a backoff
@@ -330,20 +327,6 @@ def test_dropped_nodes_are_counted(tmp_path):
 
 # --- the report deploy/run.sh reads back --------------------------------------
 
-def write_config(tmp_path):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(f"""
-accounts = ["alice", "bob"]
-data_dir = "{tmp_path / "data"}"
-publish_dir = "{tmp_path / "pub"}"
-public_base_url = "https://example.test"
-public_prefix = "0123456789abcdef"
-accounts_per_session = 2
-feed_items = 50
-min_gap_seconds = 0
-max_gap_seconds = 0
-""")
-    return config_path
 
 
 def patch_common(monkeypatch, session_factory):
@@ -372,31 +355,31 @@ def read_report(tmp_path):
 
 
 def test_successful_run_writes_an_ok_report_and_exits_zero(tmp_path, monkeypatch):
-    config_path = write_config(tmp_path)
+    use_env(tmp_path, monkeypatch)
     patch_common(monkeypatch, ContextSession(FakeSession()))
-    assert main_module.main(["--run", "--config", str(config_path)]) == 0
+    assert main_module.main(["--run"]) == 0
     report = read_report(tmp_path)
     assert report["ok"] is True and report["blocked"] is False
     assert report["visited"] == 2 and report["new_posts"] == 2
 
 
 def test_blocked_run_exits_two_and_says_so_in_the_report(tmp_path, monkeypatch):
-    config_path = write_config(tmp_path)
+    use_env(tmp_path, monkeypatch)
     patch_common(monkeypatch, ContextSession(FakeSession(raise_on="alice")))
-    assert main_module.main(["--run", "--config", str(config_path)]) == 2
+    assert main_module.main(["--run"]) == 2
     report = read_report(tmp_path)
     assert report["blocked"] is True and "429" in report["reason"]
 
 
 def test_crash_exits_one_and_still_writes_a_report(tmp_path, monkeypatch):
-    config_path = write_config(tmp_path)
+    use_env(tmp_path, monkeypatch)
 
     def explode(store, cfg):
         raise OSError("No space left on device")
 
     patch_common(monkeypatch, ContextSession(FakeSession()))
     monkeypatch.setattr(main_module, "publish", explode)   # the realistic failure
-    assert main_module.main(["--run", "--config", str(config_path)]) == 1
+    assert main_module.main(["--run"]) == 1
     report = read_report(tmp_path)
     assert report["ok"] is False
     assert "No space left" in report["error"]
@@ -404,20 +387,20 @@ def test_crash_exits_one_and_still_writes_a_report(tmp_path, monkeypatch):
 
 def test_report_fields_survive_a_quote_laden_error(tmp_path, monkeypatch):
     # run.sh reads this file with sed, which has no notion of JSON escaping.
-    config_path = write_config(tmp_path)
+    use_env(tmp_path, monkeypatch)
 
     def explode(store, cfg):
         raise RuntimeError('bad "quoted" thing\nsecond line')
 
     patch_common(monkeypatch, ContextSession(FakeSession()))
     monkeypatch.setattr(main_module, "publish", explode)
-    main_module.main(["--run", "--config", str(config_path)])
+    main_module.main(["--run"])
     error = read_report(tmp_path)["error"]
     assert '"' not in error and "\n" not in error and "\\" not in error
 
 
 def test_report_is_written_even_while_blocked_by_an_active_backoff(tmp_path, monkeypatch):
-    config_path = write_config(tmp_path)
+    use_env(tmp_path, monkeypatch)
     store = Store(tmp_path / "data")
     store.record_block("HTTP 429", NOW)
 
@@ -428,7 +411,7 @@ def test_report_is_written_even_while_blocked_by_an_active_backoff(tmp_path, mon
 
     monkeypatch.setattr(main_module, "datetime", FrozenDatetime)
     patch_common(monkeypatch, ContextSession(FakeSession()))
-    assert main_module.main(["--run", "--config", str(config_path)]) == 0
+    assert main_module.main(["--run"]) == 0
     assert "backoff" in read_report(tmp_path)["reason"]
 
 
@@ -480,12 +463,12 @@ def _forbidden_input():
 def test_login_records_and_exits_blocked_when_the_declared_navigation_is_refused(tmp_path, monkeypatch):
     # A block that IS raised, rather than merely stashed -- e.g. a 401 riding
     # on the login page itself. Must never reach the operator prompt.
-    config_path = write_config(tmp_path)
+    use_env(tmp_path, monkeypatch)
     patch_common(monkeypatch, ContextSession(
         FakeLoginSession(block_on_goto="HTTP 401 on accounts/login")))
     monkeypatch.setattr("builtins.input", lambda: _forbidden_input())
 
-    assert main_module.main(["--login", "--config", str(config_path)]) == main_module.EXIT_BLOCKED
+    assert main_module.main(["--login"]) == main_module.EXIT_BLOCKED
     assert Store(tmp_path / "data").blocked_until() is not None
 
 
@@ -494,12 +477,12 @@ def test_login_records_and_exits_blocked_when_a_block_lands_after_the_navigation
     # goto() never raises -- and a real block only lands afterwards, stashed
     # in session._block while the operator is typing. Before the fix nothing
     # ever looked at _block again past this point.
-    config_path = write_config(tmp_path)
+    use_env(tmp_path, monkeypatch)
     patch_common(monkeypatch, ContextSession(FakeLoginSession(
         block_after_input="challenge_required in response from https://www.instagram.com/api/v1/x")))
     monkeypatch.setattr("builtins.input", lambda: "")
 
-    assert main_module.main(["--login", "--config", str(config_path)]) == main_module.EXIT_BLOCKED
+    assert main_module.main(["--login"]) == main_module.EXIT_BLOCKED
     assert Store(tmp_path / "data").blocked_until() is not None
 
 
@@ -507,9 +490,9 @@ def test_login_exits_clean_when_no_block_ever_lands(tmp_path, monkeypatch):
     # The pin against a false alarm: an ordinary, successful login must still
     # exit 0 with no block recorded -- the fix must not turn every clean
     # --login into a false positive.
-    config_path = write_config(tmp_path)
+    use_env(tmp_path, monkeypatch)
     patch_common(monkeypatch, ContextSession(FakeLoginSession()))
     monkeypatch.setattr("builtins.input", lambda: "")
 
-    assert main_module.main(["--login", "--config", str(config_path)]) == main_module.EXIT_OK
+    assert main_module.main(["--login"]) == main_module.EXIT_OK
     assert Store(tmp_path / "data").blocked_until() is None
