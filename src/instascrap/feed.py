@@ -64,7 +64,7 @@ def build_feed(account: str, posts: Sequence[Post], cfg: Config,
                description: str | None = None) -> str:
     # `account` is the feed's slug, never its display name: it must match the file
     # actually written, since the id and the self link are built from it. Passing
-    # "tous les comptes" here produced an id full of spaces pointing at a file
+    # "all accounts" here produced an id full of spaces pointing at a file
     # that does not exist. Human-facing wording goes in `title`/`description`.
     self_url = f"{cfg.public_base_url}/{cfg.public_prefix}/{account}.xml"
     generator = FeedGenerator()
@@ -74,8 +74,8 @@ def build_feed(account: str, posts: Sequence[Post], cfg: Config,
     # rel="self" is what makes the id verifiable from the feed itself; RSS drops
     # the atom id, so without this the slug would be unobservable to a reader.
     generator.link(href=self_url, rel="self")
-    generator.description(description or f"Posts de @{account}, réhébergés")
-    generator.language("fr")
+    generator.description(description or f"Posts by @{account}, rehosted")
+    generator.language("en")
 
     # feedgen emits items in reverse insertion order, so insert oldest first.
     for post in sorted(posts, key=lambda p: p.timestamp_utc):
@@ -164,9 +164,9 @@ def build_index(summaries: Sequence[tuple[str, int, datetime | None]], cfg: Conf
         url = escape(_public_url(cfg, f"{account}.xml"), quote=True)
         if latest:
             plural = "s" if count > 1 else ""
-            meta = f"{count} post{plural} · dernier le {latest.strftime('%d/%m/%Y')}"
+            meta = f"{count} post{plural} · latest {latest.strftime('%Y-%m-%d')}"
         else:
-            meta = "aucun post pour l'instant"
+            meta = "no posts yet"
         rows.append(
             f'<li><span class="name"><a href="https://www.instagram.com/{name}/">@{name}</a></span>'
             f'<span class="meta">{meta}</span>'
@@ -176,24 +176,24 @@ def build_index(summaries: Sequence[tuple[str, int, datetime | None]], cfg: Conf
     all_url = escape(_public_url(cfg, "all.xml"), quote=True)
     total = sum(count for _, count, _ in summaries)
     rows.insert(0,
-        f'<li class="all"><span class="name">Tous les comptes</span>'
-        f'<span class="meta">{min(total, cfg.feed_items)} post(s) les plus récents</span>'
+        f'<li class="all"><span class="name">All accounts</span>'
+        f'<span class="meta">{min(total, cfg.feed_items)} most recent posts</span>'
         f'<span class="feed"><a href="{all_url}">{all_url}</a></span></li>')
 
     return (
-        "<!doctype html>\n<html lang=\"fr\">\n<head>\n"
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n"
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         # Belt and braces alongside Caddy: the prefix is the only thing keeping
         # these URLs private, and a page that gets indexed hands it away.
         '<meta name="robots" content="noindex, nofollow">\n'
-        "<title>Flux Instagram</title>\n"
+        "<title>Instagram feeds</title>\n"
         f"<style>{_INDEX_CSS}</style>\n</head>\n<body>\n<main>\n"
-        "<h1>Flux Instagram</h1>\n"
-        '<p class="sub">Comptes suivis et flux RSS correspondants. '
-        "Colle une URL dans ton lecteur pour t'abonner.</p>\n"
+        "<h1>Instagram feeds</h1>\n"
+        '<p class="sub">Followed accounts and their RSS feeds. '
+        "Paste a URL into your feed reader to subscribe.</p>\n"
         f"<ul>\n{chr(10).join(rows)}\n</ul>\n"
-        f'<footer>Mis à jour le {generated_at.strftime("%d/%m/%Y à %H:%M")} UTC</footer>\n'
+        f'<footer>Updated {generated_at.strftime("%Y-%m-%d %H:%M")} UTC</footer>\n'
         "</main>\n</body>\n</html>\n"
     )
 
@@ -236,9 +236,9 @@ def publish(store: Store, cfg: Config) -> list[Path]:
     all_path = out_dir / "all.xml"
     _write_text_atomic(all_path, build_feed(
         "all", everything[:cfg.feed_items], cfg,
-        title="Instagram — tous les comptes",
+        title="Instagram — all accounts",
         link="https://www.instagram.com/",
-        description="Tous les comptes suivis, réhébergés",
+        description="Every followed account, rehosted",
     ))
     written.append(all_path)
 

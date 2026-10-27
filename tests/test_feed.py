@@ -123,7 +123,7 @@ def test_all_feed_id_matches_the_file_it_is_written_to(tmp_path):
     assert 'href="https://example.test/0123456789abcdef/all.xml" rel="self"' in xml
     urls = re.findall(r'(?:href|url)="([^"]*)"', xml)
     assert urls and all(" " not in url for url in urls)   # the display name never leaks into a URL
-    assert feedparser.parse(xml).feed.title == "Instagram — tous les comptes"
+    assert feedparser.parse(xml).feed.title == "Instagram — all accounts"
 
 
 def test_enclosure_reports_the_real_byte_length(tmp_path):
@@ -185,7 +185,7 @@ def test_index_shows_an_account_that_has_no_posts_yet(tmp_path):
     html = index_of(tmp_path, accounts=("alice", "newcomer"),
                     posts_by_account={"alice": [post("AAA")]})
     assert "@newcomer" in html
-    assert "aucun post pour l'instant" in html
+    assert "no posts yet" in html
 
 
 def test_index_asks_not_to_be_indexed(tmp_path):
@@ -210,3 +210,13 @@ def test_publish_removes_feeds_left_under_an_old_secret(tmp_path):
     assert not old.exists()
     assert unrelated.exists()
     assert (cfg.publish_dir / cfg.public_prefix / "alice.xml").exists()
+
+
+def test_feed_and_index_are_in_english(tmp_path):
+    xml = build_feed("alice", [post("AAA")], cfg_for(tmp_path))
+    parsed = feedparser.parse(xml)
+    assert parsed.feed.language == "en"
+    assert parsed.feed.description == "Posts by @alice, rehosted"
+    html = index_of(tmp_path, accounts=("alice",), posts_by_account={"alice": [post("AAA")]})
+    assert '<html lang="en">' in html and "<title>Instagram feeds</title>" in html
+    assert "latest 2026-" in html   # ISO date, read the same in every locale
