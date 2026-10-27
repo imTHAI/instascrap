@@ -18,7 +18,7 @@ First start: open http://[your-server-ip]:6080/vnc.html, enter VNC_PASSWORD and 
   <Category>Tools: Network:Other</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/imTHAI/instascrap/main/unraid/instascrap.xml</TemplateURL>
-  <Icon/>
+  <Icon>https://raw.githubusercontent.com/imTHAI/instascrap/main/unraid/icon.png</Icon>
   <ExtraParams>--shm-size=1g --stop-timeout=30</ExtraParams>
   <PostArgs/>
   <CPUset/>
