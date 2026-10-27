@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>instascrap</Name>
+  <Repository>ghcr.io/imthai/instascrap:latest</Repository>
+  <Registry>https://github.com/imTHAI/instascrap/pkgs/container/instascrap</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/imTHAI/instascrap/issues</Support>
+  <Project>https://github.com/imTHAI/instascrap</Project>
+  <ReadMe>https://github.com/imTHAI/instascrap#readme</ReadMe>
+  <Overview>Follow public Instagram accounts as RSS feeds, without opening Instagram. instascrap visits the profiles a few times a day with a real Chrome signed in to an Instagram account, keeps every post and its media, and serves one feed per account on port 8080 (put your reverse proxy in front of it).&#13;
+&#13;
+Scraping breaks Instagram's terms of use and the account used can be restricted or banned: use a dedicated account, never your personal one.&#13;
+&#13;
+First start: open http://[your-server-ip]:6080/vnc.html, enter VNC_PASSWORD and sign in to Instagram. See the README.</Overview>
+  <Category>Tools: Network:Other</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/imTHAI/instascrap/main/unraid/instascrap.xml</TemplateURL>
+  <Icon/>
+  <ExtraParams>--shm-size=1g</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="Instagram accounts" Target="ACCOUNTS" Default="" Mode="" Description="Usernames to follow, comma-separated (e.g. nasagoddard,map_of_europe). A leading @ is accepted." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Public URL" Target="PUBLIC_URL" Default="" Mode="" Description="Base URL your feed reader uses to reach port 8080, e.g. https://feeds.example.com or http://192.168.1.10:8080. Changing it later means re-subscribing." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Login screen password" Target="VNC_PASSWORD" Default="" Mode="" Description="Protects the noVNC login screen on port 6080. Only the first 8 characters count." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Run times" Target="SCHEDULE" Default="08:00,14:00,21:00" Mode="" Description="Comma-separated HH:MM times, in the server's time zone. Each run starts up to JITTER_MINUTES later." Type="Variable" Display="always" Required="false" Mask="false">08:00,14:00,21:00</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/instascrap" Mode="rw" Description="Archive, Instagram session and published feeds." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/instascrap</Config>
+  <Config Name="Feeds port" Target="8080" Default="8080" Mode="tcp" Description="Feeds, media and the index page. Point your reverse proxy here." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Login screen port" Target="6080" Default="6080" Mode="tcp" Description="noVNC, open only while a login is needed. LAN only: never expose it through a reverse proxy." Type="Port" Display="always" Required="true" Mask="false">6080</Config>
+  <Config Name="Accounts per run" Target="ACCOUNTS_PER_SESSION" Default="7" Mode="" Description="Profiles visited per run. Higher means fresher feeds and a more robot-like session." Type="Variable" Display="advanced" Required="false" Mask="false">7</Config>
+  <Config Name="Items per feed" Target="FEED_ITEMS" Default="50" Mode="" Description="Maximum posts per feed. The archive keeps everything." Type="Variable" Display="advanced" Required="false" Mask="false">50</Config>
+  <Config Name="Minimum pause (s)" Target="MIN_GAP_SECONDS" Default="25" Mode="" Description="Shortest random pause between two profiles." Type="Variable" Display="advanced" Required="false" Mask="false">25</Config>
+  <Config Name="Maximum pause (s)" Target="MAX_GAP_SECONDS" Default="90" Mode="" Description="Longest random pause between two profiles." Type="Variable" Display="advanced" Required="false" Mask="false">90</Config>
+  <Config Name="Run time jitter (min)" Target="JITTER_MINUTES" Default="30" Mode="" Description="Each run starts at a random time up to this many minutes after its scheduled time." Type="Variable" Display="advanced" Required="false" Mask="false">30</Config>
+  <Config Name="Feed secret" Target="FEED_SECRET" Default="" Mode="" Description="Secret path segment in every feed URL. Leave empty to generate one; set 16 hex characters to keep existing URLs." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Discord webhook" Target="DISCORD_WEBHOOK" Default="" Mode="" Description="Alerts (login needed, throttling, broken capture). Empty: alerts only go to the container log." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="Owner of the files written to /data." Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group of the files written to /data." Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+</Container>
