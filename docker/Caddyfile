@@ -1,0 +1,20 @@
+# Serves the published feeds and media. The secret prefix in every URL is the
+# only access control, so nothing here may reveal it: no directory listing
+# (file_server without `browse`), and no admin endpoint.
+{
+	admin off
+	persist_config off
+}
+
+:8080 {
+	root * /data/public
+	# Short feed URLs: /<prefix>/<account> serves <account>.xml. Feed readers
+	# already subscribed that way must keep working.
+	try_files {path} {path}.xml
+	header {
+		X-Robots-Tag "noindex, nofollow"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	file_server
+}

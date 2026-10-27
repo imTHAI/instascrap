@@ -517,3 +517,24 @@ def test_crashed_run_alerts_and_reraises(tmp_path, monkeypatch):
     else:
         raise AssertionError("run_once must re-raise")
     assert alerter.sent == [("alert", "Run crashed")]
+
+
+def test_config_error_exits_1_without_traceback(monkeypatch, capsys):
+    for name in ("ACCOUNTS", "PUBLIC_URL", "VNC_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    assert main_module.main(["--run"]) == 1
+    captured = capsys.readouterr()
+    assert "ACCOUNTS" in captured.err and "Traceback" not in captured.err
+
+
+def test_capture_on_a_logged_out_session_requires_login_not_backoff(tmp_path, monkeypatch):
+    use_env(tmp_path, monkeypatch)
+
+    class LoggedOut:
+        def visit_profile(self, account):
+            raise LoggedOutError("redirected to /accounts/login")
+
+    monkeypatch.setattr(main_module, "Session", ContextSession(LoggedOut()))
+    assert main_module.main(["--capture", "alice"]) == main_module.EXIT_FAILED
+    store = Store(tmp_path / "data")
+    assert store.blocked_until() is None and store.login_required()

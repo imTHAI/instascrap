@@ -6,12 +6,14 @@ import json
 import logging
 import os
 import re
+import signal
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .browser import BlockedError, LoggedOutError, Session
-from .config import Config, load_config
+from .config import Config, ConfigError, load_config
 from .feed import publish
 from .login import run_login
 from .alerts import Alerter, alert_blocked
@@ -320,7 +322,24 @@ def run_once(cfg: Config, store: Store, alerter: Alerter, now: datetime,
         raise
 
 
+def _stop_on_sigterm(signum, frame) -> None:
+    # Docker stops a container with SIGTERM, whose default action kills the
+    # process on the spot. Raised as SystemExit instead, it unwinds the stack:
+    # Caddy, the login screen and Chrome are all shut down by their own cleanup.
+    raise SystemExit(0)
+
+
 def _dispatch(args, cfg: Config, alerter: Alerter) -> int:
+    if args.serve:
+        # Imported here: daemon imports run_once from this module.
+        from .daemon import serve
+        signal.signal(signal.SIGTERM, _stop_on_sigterm)
+        try:
+            serve(cfg)
+        except KeyboardInterrupt:
+            pass
+        return EXIT_OK
+
     store = Store(cfg.data_dir)
     profile_dir = cfg.data_dir / "profile"
     now = datetime.now(timezone.utc)
@@ -346,6 +365,12 @@ def _dispatch(args, cfg: Config, alerter: Alerter) -> int:
             with Session(cfg, profile_dir) as session:
                 for payload in session.visit_profile(args.capture):
                     log.info("captured %s", store.archive_raw(args.capture, payload, now))
+        except LoggedOutError as exc:
+            # Same rule as a scheduled run: a lost session needs a login, and a
+            # backoff would only delay it.
+            store.require_login(str(exc), now)
+            log.error("logged out: %s -- run --login or restart the container", exc)
+            return EXIT_FAILED
         except BlockedError as exc:
             # A block met by hand is still a block: the backoff applies, or the
             # next scheduled run walks straight back into it.
@@ -362,8 +387,10 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="instascrap")
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--run", action="store_true", help="one collection session")
-    mode.add_argument("--login", action="store_true", help="headed session for manual login")
+    mode.add_argument("--serve", action="store_true",
+                      help="run continuously: scheduled runs, login screen, feed server")
+    mode.add_argument("--run", action="store_true", help="one collection run, now")
+    mode.add_argument("--login", action="store_true", help="open the login screen now")
     mode.add_argument("--capture", metavar="ACCOUNT", help="visit one profile, archive raw only")
     mode.add_argument("--republish", action="store_true", help="rebuild feeds from the archive")
     args = parser.parse_args(argv)
@@ -378,7 +405,13 @@ def main(argv: list[str] | None = None) -> int:
         # INSTASCRAP_DATA_DIR is deliberately absent from the Unraid template: in
         # the image the volume is always /data. It exists for tests and for
         # running the code outside a container.
-        cfg = load_config(os.environ, Path(os.environ.get("INSTASCRAP_DATA_DIR", "/data")))
+        try:
+            cfg = load_config(os.environ, Path(os.environ.get("INSTASCRAP_DATA_DIR", "/data")))
+        except ConfigError as exc:
+            # Read by someone filling in the Unraid form: the message names the
+            # variable, a traceback would only bury it.
+            print(f"configuration error: {exc}", file=sys.stderr)
+            return EXIT_FAILED
         alerter = Alerter(cfg.discord_webhook)
         return _dispatch(args, cfg, alerter)
     except BlockedError as exc:
