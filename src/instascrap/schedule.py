@@ -1,7 +1,7 @@
 """When the next collection run starts. Pure, hence testable."""
 
 import random
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -20,6 +20,10 @@ def next_slot(now: datetime, slots: tuple[time, ...], tz: ZoneInfo,
         day = local_now.date() + timedelta(days=day_offset)
         for slot in slots:
             candidate = datetime.combine(day, slot, tzinfo=tz)
-            if candidate > local_now:
+            # Against `now` in its own zone, not local_now: two datetimes sharing
+            # a ZoneInfo compare as wall-clock times, ignoring the offset. In the
+            # hour repeated when daylight saving ends, that put an already-past
+            # slot in the future and ran it twice.
+            if candidate.astimezone(timezone.utc) > now.astimezone(timezone.utc):
                 return candidate + timedelta(seconds=rng.uniform(0, jitter.total_seconds()))
     raise ValueError("schedule has no slots")

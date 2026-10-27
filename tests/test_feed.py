@@ -193,3 +193,20 @@ def test_index_asks_not_to_be_indexed(tmp_path):
     # lists all of them is the worst one to have crawled.
     html = index_of(tmp_path, accounts=("alice",), posts_by_account={"alice": [post("AAA")]})
     assert 'name="robots" content="noindex, nofollow"' in html
+
+
+def test_publish_removes_feeds_left_under_an_old_secret(tmp_path):
+    # Rotating FEED_SECRET is how a leaked feed URL is revoked: the old prefix
+    # must stop being served, not linger next to the new one.
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    store.save_post(post("AAA"), {"https://cdn.test/AAA.jpg": b"jpeg"})
+    old = cfg.publish_dir / "fedcba9876543210"
+    (old / "media").mkdir(parents=True)
+    (old / "alice.xml").write_text("old")
+    unrelated = cfg.publish_dir / "notaprefix"
+    unrelated.mkdir()
+    publish(store, cfg)
+    assert not old.exists()
+    assert unrelated.exists()
+    assert (cfg.publish_dir / cfg.public_prefix / "alice.xml").exists()

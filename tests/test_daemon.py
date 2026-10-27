@@ -1,4 +1,8 @@
 import logging
+import os
+import time as time_module
+
+import pytest
 from datetime import datetime, time, timedelta, timezone
 
 from instascrap.config import Config
@@ -164,7 +168,6 @@ def test_caddy_supervisor_does_not_restart_in_a_tight_loop():
 
 
 def test_serve_holds_the_session_lock_during_runs_and_logins(tmp_path):
-    import pytest
     from instascrap.lock import SessionBusy, session_lock
     cfg = cfg_with(tmp_path)
     seen = []
@@ -181,3 +184,68 @@ def test_serve_holds_the_session_lock_during_runs_and_logins(tmp_path):
     kw["run"] = lambda c, store, alerter, now: seen.append(("run", busy()))
     serve(cfg, **kw, max_iterations=2)   # empty profile: login first, then a run
     assert seen == [("login", True), ("run", True)]
+
+
+
+class RecordingAlerter:
+    def __init__(self):
+        self.titles = []
+
+    def send(self, level, title, message):
+        self.titles.append(title)
+
+
+def test_login_screen_failure_alerts_once_a_day(tmp_path):
+    alerter, calls = RecordingAlerter(), []
+    kw = fakes(calls)
+
+    def broken(cfg, store, alerter):
+        raise RuntimeError("Xvfb did not start")
+
+    kw["login"] = broken
+    serve(cfg_with(tmp_path), **kw, alerter=alerter, max_iterations=3)   # retried hourly
+    assert alerter.titles.count("Login screen failed") == 1
+
+
+def test_profile_locks_are_cleared_before_the_first_login(tmp_path):
+    cfg = cfg_with(tmp_path)
+    profile = cfg.data_dir / "profile"
+    profile.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("dead-host-1")
+    seen = []
+    kw = fakes([])
+
+    def login(c, store, alerter):
+        seen.append(os.path.lexists(profile / "SingletonLock"))
+        store.clear_login()
+
+    kw["login"] = login
+    Store(cfg.data_dir).require_login("expired", NOW)
+    serve(cfg, **kw, max_iterations=1)
+    assert seen == [False]
+
+
+def test_sigterm_during_a_run_still_stops_caddy(tmp_path):
+    calls = []
+    kw = fakes(calls)
+
+    def interrupted(cfg, store, alerter, now):
+        raise SystemExit(0)   # what main's SIGTERM handler raises
+
+    kw["run"] = interrupted
+    with pytest.raises(SystemExit):
+        serve(with_profile(cfg_with(tmp_path)), **kw, max_iterations=1)
+    assert calls[-1] == "caddy.stop"
+
+
+def test_caddy_watchdog_restarts_without_being_polled():
+    procs = [FakePopen(exit_code=1), FakePopen(exit_code=None)]
+    ticks = iter(range(0, 10**6, 11))
+    sup = CaddySupervisor(["caddy"], popen=lambda cmd: procs.pop(0),
+                          clock=lambda: next(ticks), watch_interval=0.01)
+    sup.start()
+    deadline = time_module.monotonic() + 2
+    while procs and time_module.monotonic() < deadline:
+        time_module.sleep(0.01)
+    sup.stop()
+    assert procs == []

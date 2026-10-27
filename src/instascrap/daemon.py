@@ -9,6 +9,7 @@ import logging
 import os
 import random
 import subprocess
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,9 +28,11 @@ log = logging.getLogger(__name__)
 
 CADDY_CMD = ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
 CADDY_RESTART_MIN_S = 10
-# Sleeps are cut into slices so a dead Caddy is noticed within a minute rather
-# than at the next run, hours later.
-SLEEP_SLICE_S = 60
+STOP_TIMEOUT_S = 5
+# How often the watchdog thread checks Caddy. A thread rather than checks in
+# the main loop: a login wait can last days and a run several minutes, and the
+# feeds must not stay down that long.
+CADDY_WATCH_S = 30.0
 LOGIN_RETRY = timedelta(hours=1)
 # Chrome's single-instance markers. A container killed mid-session leaves them
 # behind, pointing at a hostname that no longer exists, and the next Chrome then
@@ -62,39 +65,61 @@ def initial_login_reason(profile_dir: Path, store: Store) -> str | None:
 
 
 class CaddySupervisor:
-    def __init__(self, cmd: list[str], popen=subprocess.Popen, clock=time.monotonic):
+    def __init__(self, cmd: list[str], popen=subprocess.Popen, clock=time.monotonic,
+                 watch_interval: float | None = CADDY_WATCH_S):
         self.cmd = cmd
         self._popen = popen
         self._clock = clock
+        self._watch_interval = watch_interval
         self._proc = None
         self._started_at = 0.0
+        # poll() runs on the watchdog thread and stop() on the main one.
+        self._lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._watcher: threading.Thread | None = None
 
     def start(self) -> None:
+        with self._lock:
+            self._spawn()
+        if self._watch_interval is not None and self._watcher is None:
+            self._watcher = threading.Thread(target=self._watch, name="caddy-watchdog", daemon=True)
+            self._watcher.start()
+
+    def _spawn(self) -> None:
         self._proc = self._popen(self.cmd)
         self._started_at = self._clock()
 
+    def _watch(self) -> None:
+        while not self._stopping.wait(self._watch_interval):
+            self.poll()
+
     def poll(self) -> None:
-        if self._proc is None:
-            return
-        code = self._proc.poll()
-        if code is None:
-            return
-        # Rate-limited so a Caddy that dies on startup (port taken, bad config)
-        # is retried every few seconds at most, not spun in a tight loop.
-        if self._clock() - self._started_at < CADDY_RESTART_MIN_S:
-            return
-        log.warning("caddy exited with %s, restarting", code)
-        self.start()
+        with self._lock:
+            if self._proc is None or self._stopping.is_set():
+                return
+            code = self._proc.poll()
+            if code is None:
+                return
+            # Rate-limited so a Caddy that dies on startup (port taken, bad
+            # config) is retried every few seconds at most, not in a tight loop.
+            if self._clock() - self._started_at < CADDY_RESTART_MIN_S:
+                return
+            log.warning("caddy exited with %s, restarting", code)
+            self._spawn()
 
     def stop(self) -> None:
-        if self._proc is None or self._proc.poll() is not None:
-            return
-        self._proc.terminate()
-        try:
-            self._proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._proc.kill()
-            self._proc.wait()
+        self._stopping.set()
+        if self._watcher is not None:
+            self._watcher.join(timeout=5)
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                return
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=STOP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
 
 
 def _utcnow() -> datetime:
@@ -103,18 +128,19 @@ def _utcnow() -> datetime:
 
 def serve(cfg: Config, *, clock=_utcnow, sleep=time.sleep, rng: random.Random | None = None,
           caddy=None, login=run_login, run=run_once, publish=publish_feeds,
-          max_iterations: int | None = None) -> None:
+          alerter: Alerter | None = None, max_iterations: int | None = None) -> None:
     rng = rng or random.Random()
     caddy = caddy or CaddySupervisor(CADDY_CMD)
     store = Store(cfg.data_dir)
-    alerter = Alerter(cfg.discord_webhook)
+    alerter = alerter or Alerter(cfg.discord_webhook)
     tz = ZoneInfo(cfg.tz)
     profile_dir = cfg.data_dir / "profile"
 
     def wait_until(deadline: datetime) -> None:
+        # In a loop: time.sleep can return early, and the test clock only moves
+        # when slept.
         while (remaining := (deadline - clock()).total_seconds()) > 0:
-            sleep(min(remaining, SLEEP_SLICE_S))
-            caddy.poll()
+            sleep(remaining)
 
     removed = clear_profile_locks(profile_dir)
     if removed:
@@ -144,7 +170,11 @@ def serve(cfg: Config, *, clock=_utcnow, sleep=time.sleep, rng: random.Random | 
                         login(cfg, store, alerter)
                 except Exception as exc:  # noqa: BLE001 -- e.g. Xvfb failed to start
                     log.exception("login screen failed")
-                    alerter.send("alert", "Login screen failed", str(exc))
+                    # Retried hourly below; alerted once a day, like "login needed".
+                    last = store.last_login_alert("failure_alerted")
+                    if last is None or clock() - last >= timedelta(hours=24):
+                        alerter.send("alert", "Login screen failed", str(exc))
+                        store.mark_login_alert(clock(), "failure_alerted")
                 if store.login_required():
                     # Unresolved: either a backoff refused to open the screen or
                     # the screen failed. Retry within the hour, or as soon as the

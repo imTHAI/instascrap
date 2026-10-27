@@ -143,7 +143,8 @@ class Store:
         # not restart its clock every time the condition is re-observed.
         previous = state["login"] or {}
         state["login"] = {"reason": reason, "at": now.isoformat(),
-                          "alerted": previous.get("alerted")}
+                          "alerted": previous.get("alerted"),
+                          "failure_alerted": previous.get("failure_alerted")}
         self._write(state)
 
     def clear_login(self) -> None:
@@ -151,14 +152,16 @@ class Store:
         state["login"] = None
         self._write(state)
 
-    def last_login_alert(self) -> datetime | None:
+    # `key` separates the reminders of one lost session: "alerted" for "login
+    # needed", "failure_alerted" for a login screen that will not start.
+    def last_login_alert(self, key: str = "alerted") -> datetime | None:
         login = self._read()["login"]
-        return _parse_iso(login.get("alerted")) if login else None
+        return _parse_iso(login.get(key)) if login else None
 
-    def mark_login_alert(self, now: datetime) -> None:
+    def mark_login_alert(self, now: datetime, key: str = "alerted") -> None:
         state = self._read()
         if state["login"] is not None:
-            state["login"]["alerted"] = now.isoformat()
+            state["login"][key] = now.isoformat()
             self._write(state)
 
     # --- freshness watchdog ---------------------------------------------

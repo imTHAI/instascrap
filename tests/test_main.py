@@ -584,3 +584,8 @@ def test_manual_run_refuses_while_the_daemon_holds_the_profile(tmp_path, monkeyp
     with session_lock(tmp_path / "data"):
         assert main_module.main(["--run"]) == main_module.EXIT_FAILED
     assert constructions == [] and "busy" in capsys.readouterr().err
+
+
+def test_sigterm_handler_unwinds_instead_of_killing():
+    with pytest.raises(SystemExit):
+        main_module._stop_on_sigterm(15, None)

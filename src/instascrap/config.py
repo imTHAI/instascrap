@@ -62,15 +62,20 @@ def parse_accounts(raw: str) -> tuple[str, ...]:
     # spaces and trailing commas; none of that is worth a startup failure.
     # Duplicates would be visited twice per rotation, so they go too.
     accounts: list[str] = []
+    seen: set[str] = set()
     for item in raw.split(","):
         name = item.strip().removeprefix("@")
-        if not name or name in accounts:
+        # Instagram usernames are case-insensitive, so NASAGoddard and
+        # nasagoddard are one account. The first spelling is kept as typed:
+        # archive paths and feed URLs already use it.
+        if not name or name.lower() in seen:
             continue
         # `.` and `..` match the charset but would escape or collapse the archive
         # tree; no real Instagram username looks like that anyway.
         if not ACCOUNT_RE.match(name) or name in (".", ".."):
             raise ConfigError(f"ACCOUNTS: invalid Instagram username {name!r}")
         accounts.append(name)
+        seen.add(name.lower())
     if not accounts:
         raise ConfigError("ACCOUNTS: at least one Instagram username is required")
     return tuple(accounts)
@@ -79,12 +84,17 @@ def parse_accounts(raw: str) -> tuple[str, ...]:
 def parse_schedule(raw: str) -> tuple[time, ...]:
     slots: set[time] = set()
     for item in raw.split(","):
+        # Same leniency as ACCOUNTS: a trailing comma is a typo, not an error.
+        if not item.strip():
+            continue
         match = SLOT_RE.match(item.strip())
         if not match:
             raise ConfigError(
                 f"SCHEDULE: {item.strip()!r} is not a HH:MM time; "
                 "expected a comma-separated list such as 08:00,14:00,21:00")
         slots.add(time(int(match.group(1)), int(match.group(2))))
+    if not slots:
+        raise ConfigError("SCHEDULE: at least one HH:MM time is required, e.g. 08:00,14:00,21:00")
     return tuple(sorted(slots))
 
 

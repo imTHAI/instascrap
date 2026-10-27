@@ -351,6 +351,15 @@ class Session:
         finally:
             self._login_mode = False
 
+    def ensure_page(self) -> bool:
+        """Reopen a tab if the person closed Chrome's window in noVNC. Returns
+        whether it did, so the caller can bring the login page back."""
+        if not self.page.is_closed():
+            return False
+        self.page = self.context.new_page()
+        self.page.on("response", self._on_response)
+        return True
+
     def cookie_names(self) -> set[str]:
         return {cookie["name"] for cookie in self.context.cookies("https://www.instagram.com")}
 

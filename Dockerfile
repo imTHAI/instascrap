@@ -13,8 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Static file server for the feeds. The official binary, copied rather than
-# installed from a third-party apt repository.
-COPY --from=caddy:2 /usr/bin/caddy /usr/local/bin/caddy
+# installed from a third-party apt repository; pinned so a rebuild of the same
+# commit gives the same image.
+COPY --from=caddy:2.11.7 /usr/bin/caddy /usr/local/bin/caddy
 COPY docker/Caddyfile /etc/caddy/Caddyfile
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 

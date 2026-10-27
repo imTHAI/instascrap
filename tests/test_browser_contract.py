@@ -1106,3 +1106,16 @@ def test_session_reads_cookie_names_and_url_without_navigating(tmp_path):
     session.page = types.SimpleNamespace(url="https://www.instagram.com/")
     assert session.cookie_names() == {"sessionid", "csrftoken"}
     assert session.current_url() == "https://www.instagram.com/"
+
+
+def test_ensure_page_reopens_a_closed_window(tmp_path):
+    # Someone closing Chrome's window in noVNC must not cost them the login screen.
+    session = make_session(tmp_path)
+    handlers = []
+    fresh = types.SimpleNamespace(is_closed=lambda: False,
+                                  on=lambda event, fn: handlers.append(event))
+    session.page = types.SimpleNamespace(is_closed=lambda: True)
+    session.context = types.SimpleNamespace(new_page=lambda: fresh)
+    assert session.ensure_page() is True
+    assert session.page is fresh and handlers == ["response"]
+    assert session.ensure_page() is False

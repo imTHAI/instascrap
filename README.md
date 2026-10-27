@@ -69,7 +69,7 @@ One container, running all the time:
 Outside Unraid, the same thing with `docker run`:
 
 ```bash
-docker run -d --name instascrap --shm-size=1g \
+docker run -d --name instascrap --shm-size=1g --stop-timeout=30 \
   -v /path/to/instascrap:/data -p 8080:8080 -p 6080:6080 \
   -e ACCOUNTS=nasagoddard,map_of_europe \
   -e PUBLIC_URL=https://feeds.example.com \
@@ -79,7 +79,9 @@ docker run -d --name instascrap --shm-size=1g \
 ```
 
 `--shm-size=1g` is required: Chrome crashes with Docker's default 64 MB of
-shared memory. The Unraid template already sets it.
+shared memory. `--stop-timeout=30` gives Chrome, the login screen and the feed
+server time to shut down cleanly instead of being killed after 10 seconds. The
+Unraid template already sets both.
 
 ## First login
 
@@ -121,6 +123,9 @@ can read it. The secret in the path is what keeps people who only know your
 domain from finding them, a bit like a "share with link" URL. Don't post feed
 URLs publicly. To keep existing URLs when you reinstall, copy the value of
 `/data/feed_secret` into `FEED_SECRET`.
+Changing `FEED_SECRET` revokes every old URL: at the next start the feeds
+move to the new secret and the old path stops being served, which is how to
+cut off a feed URL that leaked.
 
 **Changing `PUBLIC_URL`** (for example when you move from the LAN address to
 your reverse proxy): feeds are rebuilt at the next container start, but your

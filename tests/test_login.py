@@ -50,6 +50,9 @@ def fake_session_states(states):
         def goto(self, url, **kwargs):
             self.gotos.append(url)
 
+        def ensure_page(self):
+            return False
+
         def raise_if_blocked(self):
             self.index = min(self.index + 1, len(states) - 1)
             if isinstance(states[self.index], Exception):
@@ -176,3 +179,43 @@ def test_two_factor_code_entry_is_not_logged_in():
     assert not is_logged_in(cookies, "https://www.instagram.com/auth_platform/codeentry/?apc=x")
     assert not is_logged_in({"sessionid"}, "https://www.instagram.com/")
     assert is_logged_in(cookies, "https://www.instagram.com/")
+
+
+def test_new_login_screen_within_a_day_does_not_realert(tmp_path):
+    # The daemon retries a failed login screen hourly; each retry must not
+    # send "login needed" again.
+    store, alerts = Store(tmp_path), []
+    store.require_login("expired", NOW)
+    try:
+        run_login(cfg_with(tmp_path), store, recording_alerter(alerts), clock=lambda: NOW,
+                  sleep=lambda s: None, screen_factory=FakeScreen,
+                  session_factory=fake_session_states([False, RuntimeError("chrome died")]))
+    except RuntimeError:
+        pass
+    run_login(cfg_with(tmp_path), store, recording_alerter(alerts),
+              clock=lambda: NOW + timedelta(hours=1), sleep=lambda s: None,
+              screen_factory=FakeScreen, session_factory=fake_session_states([False, True]))
+    assert [t for _, t in alerts].count("Instagram login needed") == 1
+
+
+def test_closed_chrome_window_is_reopened_on_the_login_page(tmp_path):
+    store = Store(tmp_path)
+    store.require_login("expired", NOW)
+    sessions = []
+
+    class ClosesOnce(fake_session_states([False, False, True])):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.reopened = False
+            sessions.append(self)
+
+        def ensure_page(self):
+            if self.index == 0 and not self.reopened:
+                self.reopened = True
+                return True
+            return False
+
+    run_login(cfg_with(tmp_path), store, recording_alerter([]), clock=lambda: NOW,
+              sleep=lambda s: None, screen_factory=FakeScreen, session_factory=ClosesOnce)
+    assert sessions[0].gotos == ["https://www.instagram.com/accounts/login/"] * 2
+    assert store.login_required() is None

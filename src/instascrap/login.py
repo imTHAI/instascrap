@@ -164,20 +164,20 @@ def run_login(cfg: Config, store: Store, alerter: Alerter, *, clock=_utcnow, sle
                 session_factory(cfg, cfg.data_dir / "profile", headless=False) as session, \
                 session.login_mode():
             session.goto(LOGIN_URL)
-            alerted = False
             while True:
                 session.raise_if_blocked()
+                if session.ensure_page():
+                    session.goto(LOGIN_URL)
                 if is_logged_in(session.cookie_names(), session.current_url()):
                     break
                 now = clock()
                 last = store.last_login_alert()
-                # Alert on the first wait of every login screen, then once a day:
-                # the person may have missed the first one, but a reminder per
-                # poll would bury the channel.
-                if not alerted or last is None or now - last >= REMIND_EVERY:
+                # Once per lost session, then once a day. The timestamp lives in
+                # the store, not here: the daemon reopens this screen hourly when
+                # it fails, and each reopening must not alert again.
+                if last is None or now - last >= REMIND_EVERY:
                     alerter.send("alert", "Instagram login needed", message)
                     store.mark_login_alert(now)
-                    alerted = True
                 sleep(poll_s)
             # Responses are only processed during Playwright calls, so a
             # throttle in the post-login burst can land during the very

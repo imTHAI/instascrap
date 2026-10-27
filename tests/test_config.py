@@ -107,3 +107,18 @@ def test_vnc_password_that_x11vnc_would_misread_is_rejected(tmp_path, password):
     # directives: such a password could leave the login screen without one.
     with pytest.raises(ConfigError, match="VNC_PASSWORD"):
         load_config({**BASE, "VNC_PASSWORD": password}, data_dir=tmp_path)
+
+
+def test_account_duplicates_ignore_case_and_keep_first_spelling():
+    # Instagram usernames are case-insensitive, but the archive and feed URLs
+    # use the spelling given: the first one must survive unchanged.
+    assert parse_accounts("PrendsUnFruit,prendsunfruit") == ("PrendsUnFruit",)
+
+
+def test_schedule_tolerates_a_trailing_comma():
+    assert parse_schedule("08:00,14:00,") == (time(8), time(14))
+
+
+def test_schedule_of_only_commas_is_rejected():
+    with pytest.raises(ConfigError, match="SCHEDULE"):
+        parse_schedule(" , ")

@@ -43,3 +43,13 @@ def test_jitter_stays_within_bounds():
     for seed in range(50):
         delta = next_slot(now, (time(14),), PARIS, timedelta(minutes=30), Random(seed)) - base
         assert timedelta(0) <= delta <= timedelta(minutes=30)
+
+
+def test_repeated_hour_does_not_run_a_slot_twice():
+    # 2026-10-25, Paris: 02:00-03:00 happens twice. A run started at the first
+    # 02:30 (00:30Z) and finished at 02:15 CET (01:15Z) must not be scheduled
+    # again for 02:30 CEST, which is 00:30Z and already past.
+    now = datetime(2026, 10, 25, 1, 15, tzinfo=ZoneInfo("UTC"))
+    slot = next_slot(now, (time(2, 30),), PARIS, timedelta(0), Random(1))
+    assert slot > now
+    assert slot.astimezone(PARIS).date().day == 26

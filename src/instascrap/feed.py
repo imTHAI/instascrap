@@ -2,6 +2,7 @@
 incremental, so a partial write can never leave a half-correct feed behind."""
 
 import os
+import shutil
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Sequence
 
 from feedgen.feed import FeedGenerator
 
-from .config import Config
+from .config import PREFIX_RE, Config
 from .models import Post
 from .store import Store
 
@@ -197,9 +198,20 @@ def build_index(summaries: Sequence[tuple[str, int, datetime | None]], cfg: Conf
     )
 
 
+def _remove_old_prefixes(publish_dir: Path, current: str) -> None:
+    """Changing FEED_SECRET is how a leaked feed URL gets revoked, which only
+    works if the old prefix stops being served. Only directories shaped like a
+    prefix are touched; the media they hold are hardlinks, the originals stay
+    in the archive."""
+    for entry in publish_dir.iterdir():
+        if entry.is_dir() and entry.name != current and PREFIX_RE.match(entry.name):
+            shutil.rmtree(entry)
+
+
 def publish(store: Store, cfg: Config) -> list[Path]:
     out_dir = cfg.publish_dir / cfg.public_prefix
     out_dir.mkdir(parents=True, exist_ok=True)
+    _remove_old_prefixes(cfg.publish_dir, cfg.public_prefix)
     written: list[Path] = []
     everything: list[Post] = []
 
