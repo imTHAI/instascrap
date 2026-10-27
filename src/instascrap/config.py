@@ -147,6 +147,12 @@ def load_config(env: Mapping[str, str], data_dir: Path = Path("/data")) -> Confi
     public_base_url = _public_url(_required(env, "PUBLIC_URL"))
 
     vnc_password = _required(env, "VNC_PASSWORD")
+    # x11vnc reads the password from a -passwdfile, where "#" lines are
+    # comments and "__...__" lines are directives (__EMPTY__, __BEGIN_VIEWONLY__):
+    # either could leave the login screen with no password at all.
+    if vnc_password.startswith(("#", "__")) or "\n" in vnc_password or "\r" in vnc_password:
+        raise ConfigError("VNC_PASSWORD: must not start with '#' or '__' "
+                          "or contain a line break")
     if len(vnc_password) > VNC_PASSWORD_MAX:
         log.warning("VNC_PASSWORD: VNC authentication uses only the first 8 characters "
                     "of the password; the rest is ignored")

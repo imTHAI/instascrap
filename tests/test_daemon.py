@@ -161,3 +161,23 @@ def test_caddy_supervisor_does_not_restart_in_a_tight_loop():
     sup.start()
     sup.poll()
     assert len(procs) == 1
+
+
+def test_serve_holds_the_session_lock_during_runs_and_logins(tmp_path):
+    import pytest
+    from instascrap.lock import SessionBusy, session_lock
+    cfg = cfg_with(tmp_path)
+    seen = []
+
+    def busy():
+        try:
+            with session_lock(cfg.data_dir, wait=False):
+                return False
+        except SessionBusy:
+            return True
+
+    kw = fakes([])
+    kw["login"] = lambda c, store, alerter: (seen.append(("login", busy())), store.clear_login())
+    kw["run"] = lambda c, store, alerter, now: seen.append(("run", busy()))
+    serve(cfg, **kw, max_iterations=2)   # empty profile: login first, then a run
+    assert seen == [("login", True), ("run", True)]

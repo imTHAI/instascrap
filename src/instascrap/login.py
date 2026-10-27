@@ -34,10 +34,17 @@ STARTUP_TIMEOUT_S = 15
 STOP_TIMEOUT_S = 5
 
 
+# Pages a person is still on while signing in: password, 2FA code entry (old
+# and new flows), "was this you?" checks.
+AUTH_PATHS = ("/accounts/login", "/challenge", "/auth_platform", "/accounts/onetap")
+
+
 def is_logged_in(cookie_names: set[str], url: str) -> bool:
     # The cookie alone is not enough: Instagram sets sessionid before the 2FA
     # or challenge step is cleared, and the page is still on one of those.
-    return "sessionid" in cookie_names and "/accounts/login" not in url and "/challenge" not in url
+    # ds_user_id only appears once the account is actually signed in.
+    return ({"sessionid", "ds_user_id"} <= cookie_names
+            and not any(path in url for path in AUTH_PATHS))
 
 
 def vnc_url(cfg: Config) -> str:
@@ -172,6 +179,11 @@ def run_login(cfg: Config, store: Store, alerter: Alerter, *, clock=_utcnow, sle
                     store.mark_login_alert(now)
                     alerted = True
                 sleep(poll_s)
+            # Responses are only processed during Playwright calls, so a
+            # throttle in the post-login burst can land during the very
+            # cookie read that ended the loop. Checked once more before
+            # declaring success, as the old manual --login did.
+            session.raise_if_blocked()
     except BlockedError as exc:
         # login_mode drops LoggedOutError, so anything landing here is a real
         # throttle. The login stays required; the backoff decides when to retry.

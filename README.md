@@ -234,16 +234,17 @@ Run inside the container:
 
 ```bash
 # Rebuild every feed from the archive
-docker exec instascrap python3 -m instascrap --republish
+docker exec --user 99:100 instascrap python3 -m instascrap --republish
 
 # Run once now, outside the schedule
-docker exec instascrap python3 -m instascrap --run
+docker exec --user 99:100 instascrap python3 -m instascrap --run
 
 # Visit one profile and keep the raw responses in /data/raw (debugging)
-docker exec instascrap python3 -m instascrap --capture nasagoddard
+docker exec --user 99:100 instascrap python3 -m instascrap --capture nasagoddard
 ```
 
-These run as root inside the container unless you add `--user 99:100`;
-prefer `docker exec --user 99:100 ...` so the files they write keep the right
-owner. Avoid `--run` and `--capture` while a scheduled run is in progress: two
-Chromes on the same profile can corrupt the session.
+`--user 99:100` (your `PUID:PGID`) is required: as root, files written to
+`/data` would become unwritable for the container, so the commands refuse to
+start. `--run` and `--capture` also refuse during an Instagram pause, while a
+login is pending, or while the container is using the browser (a scheduled run
+or the login screen); try again once it is done.

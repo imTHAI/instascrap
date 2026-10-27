@@ -15,6 +15,7 @@ from pathlib import Path
 from .browser import BlockedError, LoggedOutError, Session
 from .config import Config, ConfigError, load_config
 from .feed import publish
+from .lock import SessionBusy, session_lock
 from .login import run_login
 from .alerts import Alerter, alert_blocked
 from .parse import extract_posts_counted, grid_owner, has_profile_grid
@@ -341,12 +342,37 @@ def _dispatch(args, cfg: Config, alerter: Alerter) -> int:
         return EXIT_OK
 
     store = Store(cfg.data_dir)
-    profile_dir = cfg.data_dir / "profile"
     now = datetime.now(timezone.utc)
 
     if args.republish:
         log.info("republished %d feeds", len(publish(store, cfg)))
         return EXIT_OK
+
+    # The manual modes obey the same rules as the daemon: never open Chrome
+    # during a backoff or on a session known to be logged out, and never next
+    # to another Chrome on the same profile.
+    # --run needs no backoff check here: run_once has its own, which also
+    # writes the report.
+    if args.capture:
+        until = store.blocked_until()
+        if until and until > now:
+            log.warning("blocked until %s; not opening a browser", until)
+            return EXIT_BLOCKED
+    if args.run or args.capture:
+        if store.login_required():
+            log.error("an Instagram login is pending (%s); sign in on the login screen first",
+                      store.login_required())
+            return EXIT_FAILED
+    try:
+        with session_lock(cfg.data_dir, wait=False):
+            return _dispatch_locked(args, cfg, alerter, store, now)
+    except SessionBusy as exc:
+        print(f"busy: {exc}; try again once it is done", file=sys.stderr)
+        return EXIT_FAILED
+
+
+def _dispatch_locked(args, cfg: Config, alerter: Alerter, store: Store, now: datetime) -> int:
+    profile_dir = cfg.data_dir / "profile"
 
     if args.login:
         # Forced even when nothing asked for it: a manual --login is how a
@@ -405,6 +431,13 @@ def main(argv: list[str] | None = None) -> int:
         # INSTASCRAP_DATA_DIR is deliberately absent from the Unraid template: in
         # the image the volume is always /data. It exists for tests and for
         # running the code outside a container.
+        # `docker exec` runs as root unless told otherwise, and root-owned files
+        # in the profile or archive then break the daemon, which runs as PUID.
+        if not args.serve and os.geteuid() == 0 and os.environ.get("PUID", "99") != "0":
+            print("refusing to run as root: files written now would be unwritable for "
+                  "the daemon. Use: docker exec --user 99:100 <container> python3 -m instascrap ...",
+                  file=sys.stderr)
+            return EXIT_FAILED
         try:
             cfg = load_config(os.environ, Path(os.environ.get("INSTASCRAP_DATA_DIR", "/data")))
         except ConfigError as exc:

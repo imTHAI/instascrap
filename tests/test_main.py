@@ -1,3 +1,4 @@
+import pytest
 import json
 from datetime import datetime, timedelta, timezone
 from instascrap import main as main_module
@@ -538,3 +539,48 @@ def test_capture_on_a_logged_out_session_requires_login_not_backoff(tmp_path, mo
     assert main_module.main(["--capture", "alice"]) == main_module.EXIT_FAILED
     store = Store(tmp_path / "data")
     assert store.blocked_until() is None and store.login_required()
+
+
+# --- manual commands must respect what the daemon respects ---------------------
+
+def tracking_session(constructions):
+    class Tracking:
+        def __init__(self, *args, **kwargs):
+            constructions.append(args)
+    return Tracking
+
+
+def test_capture_refuses_during_a_backoff(tmp_path, monkeypatch):
+    use_env(tmp_path, monkeypatch)
+    Store(tmp_path / "data").record_block("HTTP 429", datetime.now(timezone.utc))
+    constructions = []
+    monkeypatch.setattr(main_module, "Session", tracking_session(constructions))
+    assert main_module.main(["--capture", "alice"]) == main_module.EXIT_BLOCKED
+    assert constructions == []
+
+
+@pytest.mark.parametrize("mode", [["--run"], ["--capture", "alice"]])
+def test_manual_modes_refuse_while_a_login_is_pending(tmp_path, monkeypatch, mode):
+    use_env(tmp_path, monkeypatch)
+    Store(tmp_path / "data").require_login("expired", NOW)
+    constructions = []
+    monkeypatch.setattr(main_module, "Session", tracking_session(constructions))
+    assert main_module.main(mode) == main_module.EXIT_FAILED
+    assert constructions == []
+
+
+def test_manual_modes_refuse_root_when_puid_is_not_root(tmp_path, monkeypatch, capsys):
+    use_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(main_module.os, "geteuid", lambda: 0)
+    assert main_module.main(["--run"]) == main_module.EXIT_FAILED
+    assert "--user 99:100" in capsys.readouterr().err
+
+
+def test_manual_run_refuses_while_the_daemon_holds_the_profile(tmp_path, monkeypatch, capsys):
+    from instascrap.lock import session_lock
+    use_env(tmp_path, monkeypatch)
+    constructions = []
+    monkeypatch.setattr(main_module, "Session", tracking_session(constructions))
+    with session_lock(tmp_path / "data"):
+        assert main_module.main(["--run"]) == main_module.EXIT_FAILED
+    assert constructions == [] and "busy" in capsys.readouterr().err

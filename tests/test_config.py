@@ -99,3 +99,11 @@ def test_empty_discord_webhook_means_none_and_host_is_read(tmp_path):
 def test_unknown_timezone_is_named(tmp_path):
     with pytest.raises(ConfigError, match="TZ"):
         load_config({**BASE, "TZ": "Mars/Olympus"}, data_dir=tmp_path)
+
+
+@pytest.mark.parametrize("password", ["#secret1", "__EMPTY__", "__BEGIN_VIEWONLY__", "a\nb"])
+def test_vnc_password_that_x11vnc_would_misread_is_rejected(tmp_path, password):
+    # x11vnc's -passwdfile treats "#" lines as comments and "__...__" lines as
+    # directives: such a password could leave the login screen without one.
+    with pytest.raises(ConfigError, match="VNC_PASSWORD"):
+        load_config({**BASE, "VNC_PASSWORD": password}, data_dir=tmp_path)

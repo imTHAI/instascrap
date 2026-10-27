@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from .alerts import Alerter
 from .config import Config
 from .feed import publish as publish_feeds
+from .lock import session_lock
 from .login import run_login
 from .main import run_once
 from .schedule import next_slot
@@ -139,7 +140,8 @@ def serve(cfg: Config, *, clock=_utcnow, sleep=time.sleep, rng: random.Random | 
 
             if store.login_required():
                 try:
-                    login(cfg, store, alerter)
+                    with session_lock(cfg.data_dir):
+                        login(cfg, store, alerter)
                 except Exception as exc:  # noqa: BLE001 -- e.g. Xvfb failed to start
                     log.exception("login screen failed")
                     alerter.send("alert", "Login screen failed", str(exc))
@@ -164,7 +166,10 @@ def serve(cfg: Config, *, clock=_utcnow, sleep=time.sleep, rng: random.Random | 
                 log.warning("blocked until %s, skipping", until)
                 continue
             try:
-                run(cfg, store, alerter, now)
+                # Blocking: a manual `docker exec ... --run` in progress delays
+                # this run rather than sharing the profile with it.
+                with session_lock(cfg.data_dir):
+                    run(cfg, store, alerter, clock())
             except Exception:  # noqa: BLE001 -- run_once has already alerted
                 log.warning("run failed; waiting for the next slot")
     finally:

@@ -56,7 +56,7 @@ def fake_session_states(states):
                 raise states[self.index]
 
         def cookie_names(self):
-            return {"sessionid"} if states[self.index] is True else {"csrftoken"}
+            return {"sessionid", "ds_user_id"} if states[self.index] is True else {"csrftoken"}
 
         def current_url(self):
             return "https://www.instagram.com/"
@@ -71,10 +71,11 @@ def recording_alerter(sent):
 
 
 def test_is_logged_in():
-    assert is_logged_in({"sessionid", "csrftoken"}, "https://www.instagram.com/")
+    full = {"sessionid", "ds_user_id", "csrftoken"}
+    assert is_logged_in(full, "https://www.instagram.com/")
     assert not is_logged_in({"csrftoken"}, "https://www.instagram.com/")
-    assert not is_logged_in({"sessionid"}, "https://www.instagram.com/challenge/x/")
-    assert not is_logged_in({"sessionid"}, "https://www.instagram.com/accounts/login/two_factor/")
+    assert not is_logged_in(full, "https://www.instagram.com/challenge/x/")
+    assert not is_logged_in(full, "https://www.instagram.com/accounts/login/two_factor/")
 
 
 def test_vnc_url_uses_unraid_hostname(tmp_path):
@@ -143,3 +144,35 @@ def test_screen_gets_the_configured_password(tmp_path):
               screen_factory=lambda pw: seen.append(pw) or FakeScreen(pw),
               session_factory=fake_session_states([True]))
     assert seen == ["secret12"]
+
+
+def test_block_on_the_same_poll_as_logged_in_is_not_lost(tmp_path):
+    # Instagram's post-login burst can carry a throttle that is only processed
+    # during the final cookie read: it must still end in a backoff.
+    store, alerts = Store(tmp_path), []
+    store.require_login("expired", NOW)
+
+    class BlockLandsWithLogin(fake_session_states([False, True])):
+        def cookie_names(self):
+            names = super().cookie_names()
+            if "sessionid" in names:
+                self.late_block = BlockedError("HTTP 429 on /api/graphql")
+            return names
+
+        def raise_if_blocked(self):
+            if getattr(self, "late_block", None):
+                raise self.late_block
+            super().raise_if_blocked()
+
+    run_login(cfg_with(tmp_path), store, recording_alerter(alerts), clock=lambda: NOW,
+              sleep=lambda s: None, screen_factory=FakeScreen, session_factory=BlockLandsWithLogin)
+    assert store.blocked_until() is not None
+    assert store.login_required() == "expired"
+    assert ("info", "Logged in") not in alerts
+
+
+def test_two_factor_code_entry_is_not_logged_in():
+    cookies = {"sessionid", "ds_user_id"}
+    assert not is_logged_in(cookies, "https://www.instagram.com/auth_platform/codeentry/?apc=x")
+    assert not is_logged_in({"sessionid"}, "https://www.instagram.com/")
+    assert is_logged_in(cookies, "https://www.instagram.com/")
