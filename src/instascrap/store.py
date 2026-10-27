@@ -22,7 +22,12 @@ REPEAT_BACKOFF = timedelta(hours=72)
 
 _EXT = {"image": ".jpg", "video": ".mp4"}
 
-_DEFAULT_STATE = {"visited": {}, "block": None, "last_new_post": None, "first_run_at": None}
+# "login" is None while the Instagram session is believed valid, else
+# {"reason", "at", "alerted"}. Absent from state files written before it existed,
+# which therefore read as logged in -- the right default for an install whose
+# session has been working all along.
+_DEFAULT_STATE = {"visited": {}, "block": None, "last_new_post": None, "first_run_at": None,
+                  "login": None}
 
 
 class Store:
@@ -67,6 +72,10 @@ class Store:
         if block is not None and not (isinstance(block, dict) and isinstance(block.get("until"), str)):
             log.warning("state.json: 'block' has the wrong shape, reset")
             merged["block"] = None
+        login = merged.get("login")
+        if login is not None and not (isinstance(login, dict) and isinstance(login.get("reason"), str)):
+            log.warning("state.json: 'login' has the wrong shape, reset")
+            merged["login"] = None
         for key in ("last_new_post", "first_run_at"):
             if merged.get(key) is not None and not isinstance(merged[key], str):
                 merged[key] = None
@@ -121,6 +130,36 @@ class Store:
         state = self._read()
         state["block"] = None
         self._write(state)
+
+    # --- Instagram session ----------------------------------------------
+
+    def login_required(self) -> str | None:
+        login = self._read()["login"]
+        return login["reason"] if login else None
+
+    def require_login(self, reason: str, now: datetime) -> None:
+        state = self._read()
+        # An existing entry keeps its alert timestamp: the daily reminder must
+        # not restart its clock every time the condition is re-observed.
+        previous = state["login"] or {}
+        state["login"] = {"reason": reason, "at": now.isoformat(),
+                          "alerted": previous.get("alerted")}
+        self._write(state)
+
+    def clear_login(self) -> None:
+        state = self._read()
+        state["login"] = None
+        self._write(state)
+
+    def last_login_alert(self) -> datetime | None:
+        login = self._read()["login"]
+        return _parse_iso(login.get("alerted")) if login else None
+
+    def mark_login_alert(self, now: datetime) -> None:
+        state = self._read()
+        if state["login"] is not None:
+            state["login"]["alerted"] = now.isoformat()
+            self._write(state)
 
     # --- freshness watchdog ---------------------------------------------
 

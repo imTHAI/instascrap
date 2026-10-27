@@ -7,6 +7,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from instascrap.browser import (
     BlockedError,
+    LoggedOutError,
     PROFILE_GRID_EXTRA_BURSTS,
     PROFILE_GRID_POLL_S,
     PROFILE_GRID_WAIT_TIMEOUT_S,
@@ -1049,3 +1050,19 @@ def test_warm_up_settle_counts_any_response_not_only_api_traffic(tmp_path, monke
     pause_sleeps = 3
     settle_sleeps = round(WARM_UP_SETTLE_TIMEOUT_S / WARM_UP_SETTLE_POLL_S)
     assert len(sleeps) == pause_sleeps + settle_sleeps
+
+
+def test_collect_payload_raises_logged_out_on_login_redirect():
+    with pytest.raises(LoggedOutError):
+        collect_payload(200, "https://www.instagram.com/accounts/login/", None)
+
+
+def test_collect_payload_keeps_throttle_as_plain_block():
+    with pytest.raises(BlockedError) as info:
+        collect_payload(429, "https://www.instagram.com/api/graphql", None)
+    assert not isinstance(info.value, LoggedOutError)
+
+
+def test_logged_out_is_still_a_blocked_error():
+    # Every existing `except BlockedError` must keep ending the session on the spot.
+    assert issubclass(LoggedOutError, BlockedError)

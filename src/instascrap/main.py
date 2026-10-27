@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .browser import BlockedError, Session
+from .browser import BlockedError, LoggedOutError, Session
 from .config import Config, load_config
 from .feed import publish
 from .notify import notify
@@ -50,6 +50,9 @@ class SessionResult:
     # instead of two describing the same underlying failure.
     grid_missing: list[str] = field(default_factory=list)
     dropped_nodes: int = 0
+    # Set when Instagram sent the session to its login or challenge page. Not a
+    # block: no backoff is recorded, the session just needs a human again.
+    logged_out: str | None = None
 
 
 def _flat(text: str, limit: int = 300) -> str:
@@ -80,6 +83,16 @@ def _record_block(store: Store, result: SessionResult, exc: BlockedError, now: d
     result.blocked = str(exc)
     store.record_block(str(exc), now)
     notify("instascrap bloqué", f"{exc} — pause de sécurité", level="alert")
+    return result
+
+
+def _record_logout(store: Store, result: SessionResult, exc: LoggedOutError, now: datetime) -> SessionResult:
+    # Deliberately not record_block: a backoff would only delay the moment
+    # someone signs in again, and the next block after that login would then
+    # escalate straight to 72h for a refusal that never happened.
+    log.warning("logged out: %s", exc)
+    result.logged_out = str(exc)
+    store.require_login(str(exc), now)
     return result
 
 
@@ -177,12 +190,16 @@ def run_session(cfg: Config, store: Store, session, now: datetime) -> SessionRes
 
     try:
         session.warm_up()
+    except LoggedOutError as exc:
+        return _record_logout(store, result, exc, now)
     except BlockedError as exc:
         return _record_block(store, result, exc, now)
 
     for account in store.visit_order(cfg.accounts, cfg.accounts_per_session):
         try:
             _visit_account(store, session, account, now, result)
+        except LoggedOutError as exc:
+            return _record_logout(store, result, exc, now)
         except BlockedError as exc:
             return _record_block(store, result, exc, now)
         except Exception as exc:  # noqa: BLE001 — see the comment below
@@ -199,6 +216,8 @@ def run_session(cfg: Config, store: Store, session, now: datetime) -> SessionRes
 
         try:
             session.gap()
+        except LoggedOutError as exc:
+            return _record_logout(store, result, exc, now)
         except BlockedError as exc:
             return _record_block(store, result, exc, now)
 

@@ -1,4 +1,4 @@
-from instascrap.parse import detect_block, is_bare_login_redirect
+from instascrap.parse import detect_block, is_bare_login_redirect, refusal_kind
 
 OK_URL = "https://www.instagram.com/api/v1/users/web_profile_info/?username=alice"
 LOGIN_URL = "https://www.instagram.com/accounts/login/?next=/alice/"
@@ -65,3 +65,24 @@ def test_is_bare_login_redirect_false_for_a_non_login_url():
 
 def test_is_bare_login_redirect_false_for_the_challenge_path():
     assert is_bare_login_redirect(200, None, "https://www.instagram.com/challenge/AbCd/") is False
+
+
+# --- logged out vs throttled ---------------------------------------------------
+# A logged-out session needs a human, not a wait; a throttle needs a wait, never
+# a login screen. When both signals ride on one response, the throttle wins:
+# backing off is the safe mistake, opening a browser on a refusing account is not.
+
+def test_login_redirect_is_logged_out():
+    assert refusal_kind(200, None, LOGIN_URL) == "logged_out"
+
+def test_challenge_path_is_logged_out():
+    assert refusal_kind(200, None, "https://www.instagram.com/challenge/abc/") == "logged_out"
+
+def test_rate_limit_wins_over_login_url():
+    assert refusal_kind(429, None, LOGIN_URL) == "blocked"
+
+def test_marker_wins_over_login_url():
+    assert refusal_kind(400, {"message": "challenge_required"}, LOGIN_URL) == "blocked"
+
+def test_ordinary_response_is_no_refusal():
+    assert refusal_kind(200, {"status": "ok"}, OK_URL) is None

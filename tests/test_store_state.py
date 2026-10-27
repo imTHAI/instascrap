@@ -100,3 +100,25 @@ def test_state_is_read_as_utf8_regardless_of_locale(tmp_path):
     store.state_path.write_bytes(
         '{"visited": {"alicé—ü": "2026-09-04T09:00:00+00:00"}}'.encode("utf-8"))
     assert store.visit_order(["alicé—ü", "bob"], 1) == ["bob"]
+
+
+def test_login_state_round_trip(tmp_path):
+    store = Store(tmp_path)
+    assert store.login_required() is None
+    store.require_login("redirected to /accounts/login", NOW)
+    assert store.login_required() == "redirected to /accounts/login"
+    store.mark_login_alert(NOW)
+    assert store.last_login_alert() == NOW
+    store.clear_login()
+    assert store.login_required() is None and store.last_login_alert() is None
+
+
+def test_state_without_login_key_reads_as_logged_in(tmp_path):
+    # Installs predating this key (tower) must not be asked to log in again.
+    (tmp_path / "state.json").write_text('{"visited": {}, "block": null}')
+    assert Store(tmp_path).login_required() is None
+
+
+def test_malformed_login_entry_is_reset(tmp_path):
+    (tmp_path / "state.json").write_text('{"login": "oops"}')
+    assert Store(tmp_path).login_required() is None

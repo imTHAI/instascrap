@@ -17,7 +17,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from .config import Config
-from .parse import detect_block, has_profile_grid, is_bare_login_redirect
+from .parse import detect_block, has_profile_grid, is_bare_login_redirect, refusal_kind
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +122,23 @@ class BlockedError(RuntimeError):
     """Instagram pushed back. Never retried — the session ends here."""
 
 
+class LoggedOutError(BlockedError):
+    """Instagram sent the session to its login or challenge page: it needs a
+    human to sign in again, and waiting will not change that.
+
+    A subclass on purpose: every `except BlockedError` still ends the session
+    on the spot. Only callers that decide what happens *next* (backoff or login
+    screen) catch it first."""
+
+
+def raise_for_refusal(status: int, payload: dict | None, url: str) -> None:
+    kind = refusal_kind(status, payload, url)
+    if kind is None:
+        return
+    reason = detect_block(status, payload, url)
+    raise LoggedOutError(reason) if kind == "logged_out" else BlockedError(reason)
+
+
 class MediaFetchError(RuntimeError):
     """A media download failed for an ordinary reason (CDN hiccup, 404, 5xx).
 
@@ -131,9 +148,7 @@ class MediaFetchError(RuntimeError):
 
 def collect_payload(status: int, url: str, payload: dict | None) -> dict | None:
     """Decide what to do with one intercepted response. Pure, hence testable."""
-    reason = detect_block(status, payload, url)
-    if reason:
-        raise BlockedError(reason)
+    raise_for_refusal(status, payload, url)
     if payload is None or not is_api_url(url):
         return None
     return payload
@@ -607,11 +622,9 @@ class Session:
         # Through the browser context, so the request carries its cookies and headers.
         # APIRequestContext traffic never reaches page.on("response"), so media —
         # most of a session by request count — would otherwise bypass block
-        # detection entirely. The status is run through detect_block by hand.
+        # detection entirely. The status is run through the same check by hand.
         response = self.context.request.get(url)
-        reason = detect_block(response.status, None, response.url)
-        if reason:
-            raise BlockedError(reason)
+        raise_for_refusal(response.status, None, response.url)
         if response.status != 200:
             # APIResponse.body() does not raise on a non-2xx: it hands back the
             # error page. Writing that to disk would produce a permanently broken

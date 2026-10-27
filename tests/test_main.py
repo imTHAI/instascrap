@@ -2,7 +2,7 @@ import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 from instascrap import main as main_module
-from instascrap.browser import BlockedError
+from instascrap.browser import BlockedError, LoggedOutError
 from instascrap.config import Config
 from instascrap.main import run_session
 from instascrap.store import Store
@@ -43,8 +43,9 @@ def use_env(tmp_path, monkeypatch):
 
 class FakeSession:
     def __init__(self, raise_on=None, warm_up_raises=False, media_fails_on=None,
-                 empty_for=(), payloads=None):
+                 empty_for=(), payloads=None, logout_on=None):
         self.raise_on = raise_on
+        self.logout_on = logout_on
         self.warm_up_raises = warm_up_raises
         self.media_fails_on = media_fails_on
         self.empty_for = empty_for
@@ -61,6 +62,8 @@ class FakeSession:
     def visit_profile(self, account):
         if self.raise_on == account:
             raise BlockedError("HTTP 429 on profile")
+        if self.logout_on == account:
+            raise LoggedOutError("redirected to /accounts/login")
         self.visited.append(account)
         if account in self.empty_for:
             return []
@@ -496,3 +499,22 @@ def test_login_exits_clean_when_no_block_ever_lands(tmp_path, monkeypatch):
 
     assert main_module.main(["--login"]) == main_module.EXIT_OK
     assert Store(tmp_path / "data").blocked_until() is None
+
+
+# --- a logged-out session is not a block --------------------------------------
+
+def test_logout_requires_login_without_backoff(tmp_path):
+    store = Store(tmp_path / "data")
+    result = run_session(cfg_for(tmp_path), store, FakeSession(logout_on="alice"), NOW)
+    assert result.logged_out and result.blocked is None
+    assert store.blocked_until() is None
+    assert store.login_required() == "redirected to /accounts/login"
+
+
+def test_logout_keeps_an_expired_block_for_escalation(tmp_path):
+    # The run never got far enough to prove the account healthy, so the old
+    # block record stays: a block right after re-login must still escalate.
+    store = Store(tmp_path / "data")
+    store.record_block("HTTP 429", NOW - timedelta(hours=30))
+    run_session(cfg_for(tmp_path), store, FakeSession(logout_on="alice"), NOW)
+    assert store._read()["block"] is not None

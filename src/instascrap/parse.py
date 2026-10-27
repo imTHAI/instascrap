@@ -10,6 +10,7 @@ container key) has been dropped entirely rather than kept as a dead fallback.
 """
 
 import json
+from typing import Literal
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -334,6 +335,27 @@ def detect_block(status: int, payload: dict | None, url: str) -> str | None:
                 return f"{marker} in response from {url}"
 
     return None
+
+
+def refusal_kind(status: int, payload: dict | None, url: str) -> Literal["blocked", "logged_out"] | None:
+    """Sort a refusal into the two responses it calls for.
+
+    "logged_out" (a bare redirect to the login or challenge pages) needs a human
+    to sign in again and gains nothing from waiting; "blocked" (401/429 or a
+    refusal marker in the payload) needs a backoff and must never open a login
+    screen. When one response carries both, "blocked" wins: backing off is the
+    safe mistake, opening a browser on an account that is refusing is not."""
+    if detect_block(status, payload, url) is None:
+        return None
+    if status in (401, 429):
+        return "blocked"
+    if payload is not None:
+        blob = json.dumps(payload)
+        if any(marker in blob for marker in _BLOCK_MARKERS):
+            return "blocked"
+    # detect_block fired on neither the status nor a marker, so only one of
+    # _BLOCK_PATHS is left: a redirect to the login or challenge page.
+    return "logged_out"
 
 
 def is_bare_login_redirect(status: int, payload: dict | None, url: str) -> bool:
