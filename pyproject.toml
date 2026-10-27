@@ -1,6 +1,6 @@
 [project]
 name = "instascrap"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.12"
 # playwright is pinned exactly (not >=) because the Docker image installs it on top
 # of mcr.microsoft.com/playwright:v1.49.0-noble, which bundles browser binaries built
