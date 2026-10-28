@@ -327,7 +327,7 @@ def test_dropped_nodes_are_counted(tmp_path):
     assert result.new_posts == 0
 
 
-# --- the report deploy/run.sh reads back --------------------------------------
+# --- last_run.json, the report left for manual diagnosis --------------------
 
 
 

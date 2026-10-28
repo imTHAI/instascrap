@@ -1,6 +1,6 @@
 # instascrap — image Docker partageable pour Unraid
 
-> **Statut** : conception validée en discussion, pas encore implémentée
+> **Statut** : implémenté (v0.2.0) et déployé sur tower le 2026-10-27
 > **Date** : 2026-10-27
 > **Remplace** : le déploiement par User Scripts décrit dans `docs/DEPLOYMENT.md`
 > (`deploy/run.sh`, `deploy/login.sh`, `config.toml`)
