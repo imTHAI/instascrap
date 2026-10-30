@@ -42,7 +42,7 @@ officiel), tini, Xvfb/x11vnc/noVNC, GitHub Actions → ghcr.io.
 - Git : l'utilisateur interdit tout commit sans demande explicite. Les étapes
   « Commit » ne s'exécutent qu'avec son accord ; à défaut, laisser les changements
   en place et passer à la tâche suivante.
-- Tower : les URL publiques existantes (`https://feeds.example.com/3f9a1c0b7d2e4a68/...`)
+- Tower : les URL publiques existantes (`https://feeds.example.com/<feed-secret>/...`)
   doivent rester identiques après migration.
 
 ## Review Focus
@@ -165,7 +165,7 @@ def test_feed_secret_is_generated_once_and_persisted(tmp_path):
 
 def test_explicit_feed_secret_wins_and_is_validated(tmp_path):
     (tmp_path / "feed_secret").write_text("aaaaaaaaaaaaaaaa")
-    assert resolve_feed_secret("3f9a1c0b7d2e4a68", tmp_path) == "3f9a1c0b7d2e4a68"
+    assert resolve_feed_secret("<feed-secret>", tmp_path) == "<feed-secret>"
     with pytest.raises(ConfigError, match="FEED_SECRET"):
         resolve_feed_secret("NOTHEX", tmp_path)
 
@@ -687,18 +687,18 @@ Chaque action sur tower est annoncée à l'utilisateur avant exécution
 - [ ] **Step 3 : créer le conteneur** depuis le template (copié dans
   `/boot/config/plugins/dockerMan/templates-user/my-instascrap.xml`) avec :
   `ACCOUNTS` = liste de `config.toml`, `PUBLIC_URL=https://feeds.example.com`,
-  `FEED_SECRET=3f9a1c0b7d2e4a68`, `/data` = `/mnt/user/appdata/instascrap`,
+  `FEED_SECRET=<feed-secret>`, `/data` = `/mnt/user/appdata/instascrap`,
   réglages avancés recopiés, `DISCORD_WEBHOOK`, un `VNC_PASSWORD` choisi par
   l'utilisateur. Image : `ghcr.io/imthai/instascrap:latest` (ou `instascrap:next`
   local si la Task 7 n'est pas encore publiée).
 - [ ] **Step 4 : vérifier le démarrage.** Logs : chown effectué, `Feeds index:
-  https://feeds.example.com/3f9a1c0b7d2e4a68/index.html`, **aucune** alerte
+  https://feeds.example.com/<feed-secret>/index.html`, **aucune** alerte
   `Instagram login needed` (le profil existant est repris).
 - [ ] **Step 5 : basculer Caddy.** Dans le bloc `feeds.example.com`, remplacer
   `root`/`file_server` par `reverse_proxy <hôte-ou-conteneur>:<port>` en gardant
   les en-têtes existants ; recharger Caddy.
 - [ ] **Step 6 : vérifier les URL.** `curl -sI` → `200` sur
-  `https://feeds.example.com/3f9a1c0b7d2e4a68/camillelouofficiel.xml` et sur
+  `https://feeds.example.com/<feed-secret>/camillelouofficiel.xml` et sur
   `.../media/camillelouofficiel/Dd6JDD4MYsW/0_poster.jpg` ; `Range: bytes=0-99` sur
   le `.mp4` → `206`.
 - [ ] **Step 7 : premier passage réel** au créneau suivant : logs `visited=[...]`,

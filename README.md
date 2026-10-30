@@ -17,6 +17,32 @@ accounts you are not allowed to see.
 > personal one.** The defaults are deliberately slow; making them more
 > aggressive raises the risk.
 
+## Disclaimer
+
+> [!CAUTION]
+> **instascrap is provided strictly for educational and research purposes.**
+> It is not affiliated with, endorsed by, or connected to Instagram or Meta
+> Platforms, Inc. "Instagram" and "Meta" are trademarks of their respective
+> owners.
+>
+> - Automated access to Instagram is prohibited by
+>   [Instagram's Terms of Use](https://help.instagram.com/581066165581870) and
+>   Meta's policies. By using this software, you accept that **you alone are
+>   responsible** for how you use it, for complying with those terms, and for
+>   complying with the laws that apply to you (copyright, data protection such
+>   as the GDPR, computer misuse laws, and so on).
+> - The posts, photos and videos instascrap archives belong to their authors.
+>   Keep them for your own private use. Do not republish, redistribute or sell
+>   them, and do not use this tool to track, profile or harass anyone.
+> - Using instascrap can get the Instagram account it signs in with, and your
+>   IP address, restricted or permanently banned. That risk is yours.
+> - The software is provided "as is", without warranty of any kind (see
+>   [LICENSE](LICENSE)). The authors and contributors accept **no liability**
+>   for any damage, account loss, legal claim or other consequence arising from
+>   its use or misuse.
+>
+> If you do not accept these conditions, do not use this software.
+
 ## Contents
 
 - [How it works](#how-it-works)
@@ -29,6 +55,7 @@ accounts you are not allowed to see.
 - [Troubleshooting](#troubleshooting)
 - [Advanced: serve the files with your own web server](#advanced-serve-the-files-with-your-own-web-server)
 - [Manual commands](#manual-commands)
+- [License](#license)
 
 ## How it works
 
@@ -253,3 +280,9 @@ docker exec --user 99:100 instascrap python3 -m instascrap --capture nasagoddard
 start. `--run` and `--capture` also refuse during an Instagram pause, while a
 login is pending, or while the container is using the browser (a scheduled run
 or the login screen); try again once it is done.
+
+## License
+
+[MIT](LICENSE). The license covers the code only; it grants no rights over
+Instagram content, and it does not change anything in the
+[Disclaimer](#disclaimer) above.

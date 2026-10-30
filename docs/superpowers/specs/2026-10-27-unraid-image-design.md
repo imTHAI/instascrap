@@ -238,7 +238,7 @@ constructeur.
 
 1. Créer le conteneur depuis le template avec :
    `ACCOUNTS` = liste actuelle de `config.toml`,
-   `PUBLIC_URL=https://feeds.example.com`, `FEED_SECRET=3f9a1c0b7d2e4a68`,
+   `PUBLIC_URL=https://feeds.example.com`, `FEED_SECRET=<feed-secret>`,
    `/data` = `/mnt/user/appdata/instascrap`, mêmes réglages avancés, et le
    webhook Discord du homelab.
 2. Les données existantes sont reprises telles quelles ; elles appartiennent à
