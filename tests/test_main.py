@@ -589,3 +589,48 @@ def test_manual_run_refuses_while_the_daemon_holds_the_profile(tmp_path, monkeyp
 def test_sigterm_handler_unwinds_instead_of_killing():
     with pytest.raises(SystemExit):
         main_module._stop_on_sigterm(15, None)
+
+
+def _avatar_payload(pic="https://cdn.test/v/pic_n.jpg?oh=1"):
+    node = dict(PAYLOAD["data"]["xdt_api__v1__feed__user_timeline_graphql_connection"]["edges"][0]["node"])
+    node["user"] = {"username": "alice", "profile_pic_url": pic}
+    return {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [{"node": node}]}}}
+
+def test_visit_saves_the_profile_picture(tmp_path):
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    store = Store(cfg.data_dir)
+    session = FakeSession(payloads=[_avatar_payload()])
+    run_session(cfg, store, session, NOW)
+    assert "https://cdn.test/v/pic_n.jpg?oh=1" in session.fetched
+    assert store.avatar_path("alice") is not None
+
+def test_unchanged_profile_picture_is_not_downloaded_again(tmp_path):
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    store = Store(cfg.data_dir)
+    run_session(cfg, store, FakeSession(payloads=[_avatar_payload()]), NOW)
+    session = FakeSession(payloads=[_avatar_payload("https://cdn.test/v/pic_n.jpg?oh=2")])
+    run_session(cfg, store, session, NOW + timedelta(hours=8))
+    assert session.fetched == []
+
+def test_profile_picture_failure_is_not_a_run_failure(tmp_path):
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    store = Store(cfg.data_dir)
+    pic = "https://cdn.test/v/pic_n.jpg?oh=1"
+    result = run_session(cfg, store, FakeSession(payloads=[_avatar_payload(pic)],
+                                                 media_fails_on=pic), NOW)
+    assert result.failures == []
+    assert result.new_posts == 1
+    assert store.avatar_path("alice") is None
+
+def test_block_while_fetching_the_profile_picture_still_stops_the_session(tmp_path):
+    cfg = cfg_for(tmp_path, accounts=("alice",))
+    store = Store(cfg.data_dir)
+
+    class BlockingSession(FakeSession):
+        def fetch_media(self, url):
+            if "pic_n" in url:
+                raise BlockedError("HTTP 429 on avatar")
+            return super().fetch_media(url)
+
+    run_session(cfg, store, BlockingSession(payloads=[_avatar_payload()]), NOW)
+    assert store.blocked_until() is not None

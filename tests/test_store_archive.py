@@ -116,3 +116,39 @@ def test_post_json_is_written_and_read_as_utf8(tmp_path):
 def dataclasses_replace_caption(post, caption):
     import dataclasses
     return dataclasses.replace(post, caption=caption)
+
+
+AVATAR = "https://cdn.test/v/123_n.jpg?oh=first&oe=1"
+
+
+def test_avatar_is_absent_until_saved(tmp_path):
+    store = Store(tmp_path)
+    assert store.avatar_path("alice") is None
+    assert not store.has_avatar("alice", AVATAR)
+
+
+def test_saved_avatar_is_served_from_the_account_media_dir(tmp_path):
+    store = Store(tmp_path)
+    rel = store.save_avatar("alice", AVATAR, b"jpeg")
+    assert rel.startswith("media/alice/avatar-") and rel.endswith(".jpg")
+    assert (tmp_path / rel).read_bytes() == b"jpeg"
+    assert store.avatar_path("alice") == rel
+
+
+def test_avatar_is_current_across_re_signed_cdn_urls(tmp_path):
+    # The CDN re-signs the same picture with a new query string on every visit;
+    # only the path identifies the picture, so that alone must not cost a download.
+    store = Store(tmp_path)
+    store.save_avatar("alice", AVATAR, b"jpeg")
+    assert store.has_avatar("alice", "https://cdn.test/v/123_n.jpg?oh=second&oe=2")
+    assert not store.has_avatar("alice", "https://cdn.test/v/456_n.jpg?oh=first&oe=1")
+
+
+def test_new_avatar_replaces_the_old_one_under_a_new_name(tmp_path):
+    # A new name per picture is what makes readers drop their cached icon.
+    store = Store(tmp_path)
+    old = store.save_avatar("alice", AVATAR, b"old")
+    new = store.save_avatar("alice", "https://cdn.test/v/456_n.jpg?oh=x", b"new")
+    assert new != old
+    assert not (tmp_path / old).exists()
+    assert store.avatar_path("alice") == new

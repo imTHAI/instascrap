@@ -1,3 +1,4 @@
+import dataclasses
 import re
 from datetime import datetime, timedelta, timezone
 import feedparser
@@ -176,7 +177,7 @@ def test_index_lists_every_account_with_its_feed_url(tmp_path):
     assert "https://example.test/0123456789abcdef/alice.xml" in html
     assert "https://example.test/0123456789abcdef/all.xml" in html
     assert "https://www.instagram.com/alice/" in html
-    assert "2 posts" in html
+    assert '2</span> posts' in html
 
 
 def test_index_shows_an_account_that_has_no_posts_yet(tmp_path):
@@ -219,4 +220,92 @@ def test_feed_and_index_are_in_english(tmp_path):
     assert parsed.feed.description == "Posts by @alice, rehosted"
     html = index_of(tmp_path, accounts=("alice",), posts_by_account={"alice": [post("AAA")]})
     assert '<html lang="en">' in html and "<title>Instagram feeds</title>" in html
-    assert "latest 2026-" in html   # ISO date, read the same in every locale
+    # ISO date, read the same in every locale; the browser may relabel it.
+    assert 'data-relative>2026-09-04</time>' in html
+
+
+def test_feed_declares_the_avatar_as_its_image(tmp_path):
+    cfg = cfg_for(tmp_path)
+    parsed = feedparser.parse(build_feed("alice", [post("AAA")], cfg,
+                                         avatar="media/alice/avatar-abc.jpg"))
+    assert parsed.bozo is False
+    assert parsed.feed.image.href == "https://example.test/0123456789abcdef/media/alice/avatar-abc.jpg"
+    # RSS 2.0 wants the image's link to be the channel's own.
+    assert parsed.feed.image.link == parsed.feed.link
+
+
+def test_feed_without_an_avatar_has_no_image(tmp_path):
+    xml = build_feed("alice", [post("AAA")], cfg_for(tmp_path))
+    assert "<image>" not in xml
+
+
+def test_account_feed_links_to_its_own_page(tmp_path):
+    parsed = feedparser.parse(build_feed("alice", [post("AAA")], cfg_for(tmp_path)))
+    assert parsed.feed.link == "https://example.test/0123456789abcdef/alice.html"
+
+
+def test_publish_writes_an_account_page_carrying_the_avatar_as_icon(tmp_path):
+    # Readers that ignore <image> take the icon from the channel link's page.
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    store.save_post(post("AAA"), {"https://cdn.test/AAA.jpg": b"jpeg"})
+    rel = store.save_avatar("alice", "https://cdn.test/v/pic_n.jpg?oh=1", b"avatar")
+    publish(store, cfg)
+    out = cfg.publish_dir / cfg.public_prefix
+    page = (out / "alice.html").read_text()
+    icon = f"https://example.test/0123456789abcdef/{rel}"
+    assert f'<link rel="icon" href="{icon}"' in page
+    assert f'<link rel="apple-touch-icon" href="{icon}"' in page
+    assert "https://www.instagram.com/alice/" in page
+    assert 'content="noindex, nofollow"' in page
+    assert (out / rel).read_bytes() == b"avatar"
+
+
+def test_account_page_without_an_avatar_has_no_icon(tmp_path):
+    cfg = cfg_for(tmp_path)
+    publish(Store(cfg.data_dir), cfg)
+    page = (cfg.publish_dir / cfg.public_prefix / "alice.html").read_text()
+    assert 'rel="icon"' not in page
+
+
+def test_index_shows_recent_posts_as_thumbnails_linking_to_instagram(tmp_path):
+    html = index_of(tmp_path, accounts=("alice",),
+                    posts_by_account={"alice": [post(f"P{i}", ts=NOW - timedelta(days=i))
+                                                for i in range(6)]})
+    thumbs = re.findall(r'<a(?: class="video")? href="(https://www\.instagram\.com/p/[^"]+)">', html)
+    # Newest first, and capped: the row is a glance, not a gallery.
+    assert thumbs == [f"https://www.instagram.com/p/P{i}/" for i in range(4)]
+    assert 'src="https://example.test/0123456789abcdef/media/alice/P0/0.jpg"' in html
+
+
+def test_index_thumbnail_of_a_video_is_its_poster(tmp_path):
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    store.save_post(video_post(), {"https://cdn.test/v.mp4": b"mp4", "https://cdn.test/v.jpg": b"jpg"})
+    publish(store, cfg)
+    html = (cfg.publish_dir / cfg.public_prefix / "index.html").read_text()
+    assert "media/alice/VID/0_poster.jpg" in html
+    assert 'src="https://example.test/0123456789abcdef/media/alice/VID/0.mp4"' not in html
+    assert 'class="video"' in html
+
+
+def test_index_puts_the_most_recently_active_account_first(tmp_path):
+    def mine(account, shortcode, ts):
+        return dataclasses.replace(post(shortcode, ts=ts), account=account)
+    html = index_of(tmp_path, accounts=("quiet", "newcomer", "busy"),
+                    posts_by_account={"quiet": [mine("quiet", "Q", NOW - timedelta(days=9))],
+                                      "busy": [mine("busy", "B", NOW)]})
+    order = re.findall(r'class="handle" href="https://www\.instagram\.com/(\w+)/"', html)
+    assert order == ["busy", "quiet", "newcomer"]
+
+
+def test_index_uses_the_avatar_and_offers_to_copy_each_feed_url(tmp_path):
+    cfg = cfg_for(tmp_path)
+    store = Store(cfg.data_dir)
+    store.save_post(post("AAA"), {"https://cdn.test/AAA.jpg": b"jpeg"})
+    rel = store.save_avatar("alice", "https://cdn.test/v/pic_n.jpg?oh=1", b"avatar")
+    publish(store, cfg)
+    html = (cfg.publish_dir / cfg.public_prefix / "index.html").read_text()
+    assert f'src="https://example.test/0123456789abcdef/{rel}"' in html
+    assert 'data-url="https://example.test/0123456789abcdef/alice.xml"' in html
+    assert 'data-url="https://example.test/0123456789abcdef/all.xml"' in html

@@ -6,6 +6,7 @@ mid-write when the container is stopped."""
 
 import dataclasses
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -237,6 +238,37 @@ class Store:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_bytes(data)
         os.replace(tmp, path)
+
+    # --- profile picture ----------------------------------------------
+
+    # Named after the CDN path rather than a fixed avatar.jpg, for two reasons:
+    # publish() hardlinks and never replaces an existing public file, and feed
+    # readers cache icons by URL. A new picture under a new name sidesteps both.
+    # The path alone identifies the picture; the query string is a signature the
+    # CDN reissues on every visit and would trigger a download each time.
+    def _avatar_rel(self, account: str, url: str) -> str:
+        digest = hashlib.sha1(urlparse(url).path.encode()).hexdigest()[:12]
+        return f"media/{account}/avatar-{digest}.jpg"
+
+    def avatar_path(self, account: str) -> str | None:
+        directory = self.data_dir / "media" / account
+        found = sorted(directory.glob("avatar-*.jpg")) if directory.exists() else []
+        return f"media/{account}/{found[0].name}" if found else None
+
+    def has_avatar(self, account: str, url: str) -> bool:
+        return (self.data_dir / self._avatar_rel(account, url)).exists()
+
+    def save_avatar(self, account: str, url: str, data: bytes) -> str:
+        rel = self._avatar_rel(account, url)
+        target = self.data_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._write_bytes_atomic(target, data)
+        # Exactly one avatar per account is what lets avatar_path() skip any
+        # bookkeeping. Copies already hardlinked into public/ are left alone.
+        for old in target.parent.glob("avatar-*.jpg"):
+            if old != target:
+                old.unlink(missing_ok=True)
+        return rel
 
     def load_posts(self, account: str, limit: int | None = None) -> list[Post]:
         directory = self._posts_dir(account)

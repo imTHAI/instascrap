@@ -7,6 +7,7 @@ from instascrap.parse import (
     extract_posts_counted,
     grid_owner,
     has_profile_grid,
+    profile_pic_url,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -359,3 +360,35 @@ def test_extraction_keeps_a_post_authored_by_a_coauthor():
     posts = extract_posts(grid_of("alan", "reacherprimevideo"), "alan")
     assert [p.shortcode for p in posts] == ["POST0", "POST1"]
     assert {p.account for p in posts} == {"alan"}
+
+
+def _grid(*users):
+    return {"data": {"xdt_api__v1__feed__user_timeline_graphql_connection": {"edges": [
+        {"node": {"code": f"P{i}", "user": user}} for i, user in enumerate(users)]}}}
+
+
+def test_profile_pic_prefers_the_hd_rendition():
+    payload = load("real_profile.json")
+    owner = next(e["node"]["user"] for e in raw_edges()
+                 if e["node"]["user"]["username"] == "michellemonaghan")
+    assert profile_pic_url(payload, "michellemonaghan") == owner["hd_profile_pic_url_info"]["url"]
+
+
+def test_profile_pic_falls_back_to_the_standard_rendition():
+    payload = _grid({"username": "alice", "profile_pic_url": "https://cdn.test/a.jpg"})
+    assert profile_pic_url(payload, "alice") == "https://cdn.test/a.jpg"
+
+
+def test_profile_pic_ignores_a_collab_co_author():
+    # On a collab post the node's `user` is the co-author: their picture must
+    # never become the followed account's icon.
+    payload = _grid({"username": "bob", "profile_pic_url": "https://cdn.test/bob.jpg"},
+                    {"username": "Alice", "profile_pic_url": "https://cdn.test/alice.jpg"})
+    assert profile_pic_url(payload, "alice") == "https://cdn.test/alice.jpg"
+    assert profile_pic_url(_grid({"username": "bob", "profile_pic_url": "x"}), "alice") is None
+
+
+def test_profile_pic_tolerates_malformed_users():
+    payload = _grid(None, {"username": "alice", "hd_profile_pic_url_info": "nope"},
+                    {"username": "alice", "profile_pic_url": 42})
+    assert profile_pic_url(payload, "alice") is None

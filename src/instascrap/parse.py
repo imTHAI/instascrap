@@ -226,6 +226,33 @@ def grid_owner(payload) -> str | None:
     return ranked[0][0]
 
 
+def profile_pic_url(payload, account: str) -> str | None:
+    """The followed account's own profile picture, from the grid it already
+    sends: every node's `user` carries it, so the feed icon costs no extra
+    request to Instagram, only one CDN download whenever the picture changes.
+
+    Only nodes authored by `account` count. On a collab post `user` is the
+    co-author (see grid_owner), and their face must not become the icon.
+    The HD rendition (1080 px) is preferred: readers scale it down for a
+    sidebar icon, but apple-touch-icon consumers want something bigger than
+    the 150 px default."""
+    wanted = account.casefold()
+    for edge in _walk_edges(payload):
+        node = edge.get("node") if isinstance(edge, dict) else None
+        user = node.get("user") if isinstance(node, dict) else None
+        if not isinstance(user, dict):
+            continue
+        username = user.get("username")
+        if not isinstance(username, str) or username.casefold() != wanted:
+            continue
+        hd = user.get("hd_profile_pic_url_info")
+        candidates = (hd.get("url") if isinstance(hd, dict) else None, user.get("profile_pic_url"))
+        for url in candidates:
+            if isinstance(url, str) and url:
+                return url
+    return None
+
+
 def _has_grid_container(payload) -> bool:
     if isinstance(payload, dict):
         for key, value in payload.items():

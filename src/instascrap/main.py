@@ -18,7 +18,7 @@ from .feed import publish
 from .lock import SessionBusy, session_lock
 from .login import run_login
 from .alerts import Alerter, alert_blocked
-from .parse import extract_posts_counted, grid_owner, has_profile_grid
+from .parse import extract_posts_counted, grid_owner, has_profile_grid, profile_pic_url
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -112,6 +112,28 @@ def _fetch_post_media(session, post) -> dict[str, bytes]:
     return fetched
 
 
+def _refresh_avatar(store: Store, session, account: str, payloads: list) -> None:
+    url = None
+    for payload in payloads:
+        # Same ownership gate as the posts: a late foreign grid would otherwise
+        # hand this account the previous profile's face.
+        if has_profile_grid(payload, account):
+            url = profile_pic_url(payload, account)
+            if url:
+                break
+    if url is None or store.has_avatar(account, url):
+        return
+    try:
+        store.save_avatar(account, url, session.fetch_media(url))
+    except BlockedError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the icon is cosmetic
+        # Kept out of result.failures on purpose: that list drives the "Partial
+        # failures" alert, and a missing icon is not worth waking anyone for.
+        # The next visit simply tries again.
+        log.warning("%s: profile picture not saved: %s", account, exc)
+
+
 def _visit_account(store: Store, session, account: str,
                    now: datetime, result: SessionResult) -> None:
     payloads = session.visit_profile(account)
@@ -173,6 +195,9 @@ def _visit_account(store: Store, session, account: str,
                 continue
             known.add(post.shortcode)
             result.new_posts += 1
+
+    # After the posts, so a CDN hiccup on the icon can never delay the harvest.
+    _refresh_avatar(store, session, account, payloads)
 
 
 def run_session(cfg: Config, store: Store, session, now: datetime) -> SessionResult:
